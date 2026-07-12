@@ -22,6 +22,57 @@ and answers questions about your work **with citations to the exact files it use
 
 ---
 
+## Your DAW makes the music. SessionIQ makes the whole operation make sense.
+
+A great track can still disappear into a bad workflow: cryptic filenames, forgotten mix notes,
+duplicate bounces, scattered TODOs, mystery tempos, and projects that are *almost finished* for
+months. The bigger the catalog gets, the more creative time is lost just reconstructing context.
+
+**SessionIQ turns that production sprawl into a searchable creative control room.** Drop in audio,
+MIDI, and notes and it builds a living view of what exists, how it sounds, what still needs work,
+and what to do next. Ask a question across one song or an entire catalog and get an answer backed by
+the exact source files—not another confident AI guess.
+
+### The problems it solves
+
+| The question that slows a session down | What SessionIQ gives you |
+| --- | --- |
+| **“Where is the right file?”** | One organized album/song workspace with search, smart collections, tags, statuses, and files that move on disk when projects move. |
+| **“What is actually finished?”** | Project Health, completion checks, automatically extracted action items, and progress tracking across every song. |
+| **“What do we already have that fits?”** | Meaning-based search plus track similarity across tempo, key, brightness, loudness, and duration. |
+| **“What did we decide last time?”** | Notes, session history, creative preferences, and a library-wide producer fingerprint that persist between sessions. |
+| **“Can I trust this AI answer?”** | File-level citations and a Quality Report with confidence, grounding, hallucination risk, model provenance, latency, and token usage. |
+| **“Can I keep sensitive work private?”** | A fully offline baseline with optional local Ollama and local vector search; cloud AI is an upgrade, not a requirement. |
+
+### Built for the people responsible for getting music over the finish line
+
+- **Producers and artists** get less admin, faster session recall, and a clear answer to “what should
+  I finish next?”—without interrupting the creative flow to maintain a system by hand.
+- **Managers, A&R, and executive producers** get a portfolio-level view of every song, open action,
+  reference, master, and readiness signal—without opening every folder or chasing a status update.
+- **Engineers and studios** get searchable technical facts, consistent project context, and a faster
+  handoff from rough idea to mix-ready or master-ready deliverable.
+
+### One workspace instead of five disconnected tools
+
+SessionIQ can replace much of the day-to-day **glue work** currently split across:
+
+- Finder / File Explorer archaeology and fragile filename conventions
+- spreadsheets, Notion pages, or Trello boards used as manual production trackers
+- separate BPM/key inspectors and repeated manual audio checks
+- scattered text files, task lists, and “I’ll remember that” session notes
+- generic AI chats that cannot show which project file supports an answer
+- manual catalog audits to find unfinished, missing, related, or release-ready work
+
+It does **not** replace your DAW, audio editor, mastering suite, rights database, or delivery service.
+It makes those tools dramatically more useful by becoming the intelligent layer that connects the
+files, facts, decisions, and next actions around them.
+
+> **The result:** less time managing the work, less context lost between sessions, and more music
+> moving from *promising idea* to *finished release*.
+
+---
+
 ## Overview
 
 SessionIQ is **not** a DAW plugin and it does not generate music. It's a smart project notebook and
