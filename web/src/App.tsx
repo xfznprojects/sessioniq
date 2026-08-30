@@ -38,33 +38,22 @@ import {
   Telescope,
   Trash2,
   Upload,
-  Volume2,
-  VolumeX,
   Workflow,
   X,
   XCircle
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis
-} from "recharts";
-import WaveSurfer from "wavesurfer.js";
-
 import { Badge, Button, Card, SectionTitle, Stat } from "./components/ui";
 import { ConfirmDialog, ContextMenu, type MenuState } from "./components/ContextMenu";
 import { Sidebar, type GroupFilter } from "./components/Sidebar";
-import { PipelineView } from "./components/Pipeline";
-import { InsightsView } from "./components/Insights";
-import { StudioView } from "./components/Studio";
+import { Player } from "./components/Player";
+import { requestJson } from "./lib/api";
+import { assetsInScope } from "./lib/workspace";
+const PipelineView = lazy(() => import("./components/Pipeline").then(m => ({ default: m.PipelineView })));
+const InsightsView = lazy(() => import("./components/Insights").then(m => ({ default: m.InsightsView })));
+const StudioView = lazy(() => import("./components/Studio").then(m => ({ default: m.StudioView })));
+const AnalysisCharts = lazy(() => import("./components/AnalysisCharts"));
 import { readClientAudioTags } from "./lib/audioTags";
 import { cn, EASE_OUT, formatSeconds } from "./lib/utils";
 import type {
@@ -172,6 +161,13 @@ export default function App() {
   const [library, setLibrary] = useState<LibraryResponse>({ assets: [], projects: [], smartCollections: {} });
   const [selectedProject, setSelectedProject] = useState<string>("All Projects");
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [collection, setCollection] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(0);
+  const [railTab, setRailTab] = useState<"assistant" | "tasks">("assistant");
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const mutations = useRef(Promise.resolve());
+  const questionSerial = useRef(0);
   const [viewMode, setViewMode] = useState<ViewMode>("table");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [chatQuestion, setChatQuestion] = useState("");
@@ -187,14 +183,13 @@ export default function App() {
   const [assetToDelete, setAssetToDelete] = useState<SessionAsset | null>(null);
 
   useEffect(() => {
-    refreshLibrary();
-    refreshValidation();
+    void perform(refreshLibrary);
+    void perform(refreshValidation);
     fetch(`${API}/api/ai-status`).then((r) => r.json()).then(setAiStatus).catch(() => setAiStatus(null));
     fetch(`${API}/api/pipeline`).then((r) => r.json()).then(setPipeline).catch(() => setPipeline(null));
   }, []);
 
   const accent = theme === "dark" ? "oklch(0.66 0.17 256)" : "oklch(0.58 0.19 258)";
-  const selectedAsset = library.assets.find((a) => a.id === selectedAssetId) ?? library.assets[0];
 
   const inScope = (projectName: string) =>
     selectedProject === "All Projects" ||
@@ -203,8 +198,7 @@ export default function App() {
 
   const scopedAssets = useMemo(
     () =>
-      library.assets.filter((asset) => {
-        if (!inScope(asset.project_name)) return false;
+      assetsInScope(library.assets, selectedProject, collection ? library.smartCollections[collection] ?? [] : undefined).filter((asset) => {
         if (filters.query && !asset.file_name.toLowerCase().includes(filters.query.toLowerCase())) return false;
         if (filters.types.length && !filters.types.includes(asset.display_type)) return false;
         if (filters.statuses.length && !filters.statuses.includes(asset.status)) return false;
@@ -215,93 +209,90 @@ export default function App() {
           return false;
         return true;
       }),
-    [library.assets, selectedProject, filters]
+    [library.assets, library.smartCollections, selectedProject, collection, filters]
   );
 
   const projectNames = library.projects.map((p) => p.project_name);
-  const focusProject =
-    selectedProject === "All Projects"
-      ? library.projects[0]
-      : library.projects.find((p) => p.project_name === selectedProject) ??
-        library.projects.find((p) => p.project_name.startsWith(selectedProject + "/"));
+  const selectedAsset = scopedAssets.find(a => a.id === selectedAssetId) ?? scopedAssets[0];
+  const focusProject = selectedProject === "All Projects" ? undefined
+    : library.projects.find(p => p.project_name === selectedProject);
+  const scopedProjects = library.projects.filter(p => inScope(p.project_name));
+  const scopedTasks = scopedProjects.flatMap(p => p.tasks);
+  const openTasks = scopedTasks.filter(t => t.status !== "Done").length;
+  const scopeLabel = collection ?? selectedProject;
+
+  function selectProject(project: string) {
+    questionSerial.current += 1;
+    setChatLoading(false); setChatResult(null);
+    setSelectedProject(project); setCollection(null); setFilters(EMPTY_FILTERS);
+    setSelectedAssetId(null); setLibraryOpen(false);
+  }
+
   const chatQuality: QualityReport | undefined = chatResult?.quality;
 
+  async function perform(action: () => Promise<void>): Promise<boolean> {
+    setError("");
+    try { await action(); return true; }
+    catch (error) { setError(error instanceof Error ? error.message : "Something went wrong. Please retry."); return false; }
+  }
   async function refreshLibrary() {
-    const data = await (await fetch(`${API}/api/library`)).json();
-    setLibrary(data);
-    if (!selectedAssetId && data.assets[0]) setSelectedAssetId(data.assets[0].id);
+    setLibrary(await requestJson<LibraryResponse>(`${API}/api/library`));
   }
-
   async function refreshValidation() {
-    setValidation(await (await fetch(`${API}/api/validation`)).json());
+    setValidation(await requestJson(`${API}/api/validation`));
   }
-
+  async function mutate(url: string, method: string, body?: unknown): Promise<boolean> {
+    setBusy(count => count + 1);
+    let success = false;
+    const work = mutations.current.then(async () => {
+      success = await perform(async () => {
+        const data = await requestJson(url, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+        setLibrary(data.library);
+      });
+    }).finally(() => setBusy(count => count - 1));
+    mutations.current = work;
+    await work;
+    return success;
+  }
   async function uploadFiles(form: HTMLFormElement) {
-    const formData = new FormData(form);
-    const fileInput = form.elements.namedItem("files") as HTMLInputElement | null;
-    const clientTags = await readClientAudioTags(fileInput?.files ?? null);
-    formData.append("client_metadata", JSON.stringify(clientTags));
+    if (uploading) return;
     setUploading(true);
-    try {
-      const response = await fetch(`${API}/api/upload`, { method: "POST", body: formData });
-      if (!response.ok) {
-        alert((await response.json()).detail ?? "Upload failed");
-        return;
-      }
-      await refreshLibrary();
-      form.reset();
-      setUploadOpen(false);
-    } finally {
-      setUploading(false);
-    }
+    await perform(async () => {
+      const formData = new FormData(form);
+      const fileInput = form.elements.namedItem("files") as HTMLInputElement | null;
+      formData.append("client_metadata", JSON.stringify(await readClientAudioTags(fileInput?.files ?? null)));
+      await requestJson(`${API}/api/upload`, { method: "POST", body: formData });
+      await refreshLibrary(); form.reset(); setUploadOpen(false);
+    });
+    setUploading(false);
   }
-
   async function askQuestion(override?: string) {
     const question = (override ?? chatQuestion).trim();
-    if (!question) return;
+    if (!question || chatLoading) return;
+    const serial = ++questionSerial.current;
+    setRailTab("assistant"); setChatLoading(true); setChatResult(null);
     if (override) setChatQuestion(override);
-    setChatLoading(true);
-    try {
-      const response = await fetch(`${API}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question,
-          project_name: selectedProject === "All Projects" ? null : selectedProject
-        })
+    await perform(async () => {
+      const data = await requestJson(`${API}/api/chat`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, project_name: selectedProject === "All Projects" ? null : selectedProject })
       });
-      setChatResult(await response.json());
-      await refreshValidation();
-    } finally {
-      setChatLoading(false);
-    }
+      if (serial === questionSerial.current) setChatResult(data);
+    });
+    if (serial === questionSerial.current) setChatLoading(false);
   }
-
   async function updateAsset(asset: SessionAsset, update: Partial<Pick<SessionAsset, "status" | "tags" | "project_name" | "note">>) {
-    await fetch(`${API}/api/assets/${encodeURIComponent(asset.id)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(update)
-    });
-    await refreshLibrary();
+    return mutate(`${API}/api/assets/${encodeURIComponent(asset.id)}`, "PATCH", update);
   }
-
   async function doDeleteAsset(asset: SessionAsset) {
-    await fetch(`${API}/api/assets/${encodeURIComponent(asset.id)}`, { method: "DELETE" });
-    if (selectedAssetId === asset.id) setSelectedAssetId(null);
-    await refreshLibrary();
-  }
-
-  async function deleteProject(path: string) {
-    await fetch(`${API}/api/projects/delete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: path })
-    });
-    if (selectedProject === path || selectedProject.startsWith(path + "/")) {
-      setSelectedProject("All Projects");
+    if (await mutate(`${API}/api/assets/${encodeURIComponent(asset.id)}`, "DELETE")) {
+      if (selectedAssetId === asset.id) setSelectedAssetId(null);
     }
-    await refreshLibrary();
+  }
+  async function deleteProject(path: string) {
+    if (await mutate(`${API}/api/projects/delete`, "POST", { name: path })) {
+      if (selectedProject === path || selectedProject.startsWith(path + "/")) selectProject("All Projects");
+    }
   }
 
   function openFileContext(event: React.MouseEvent, asset: SessionAsset) {
@@ -322,49 +313,41 @@ export default function App() {
   }
 
   async function updateTask(taskId: string, status: TaskStatus) {
-    await fetch(`${API}/api/tasks/${taskId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status })
-    });
-    await refreshLibrary();
+    await mutate(`${API}/api/tasks/${taskId}`, "PATCH", { status });
   }
-
   async function renameProject(oldName: string, newName: string) {
-    await fetch(`${API}/api/projects/rename`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ old_name: oldName, new_name: newName })
-    });
-    if (selectedProject === oldName) setSelectedProject(newName);
-    await refreshLibrary();
+    if (await mutate(`${API}/api/projects/rename`, "POST", { old_name: oldName, new_name: newName })) {
+      if (selectedProject === oldName || selectedProject.startsWith(oldName + "/")) {
+        selectProject(newName + selectedProject.slice(oldName.length));
+      }
+    }
   }
 
   return (
    <MotionConfig reducedMotion="user">
-    <div className="dot-grid flex h-screen overflow-hidden bg-background text-foreground">
+    <div className="dot-grid flex h-screen flex-col overflow-hidden bg-background text-foreground">
+    <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+      <div className={cn("max-h-64 shrink-0 overflow-y-auto md:max-h-none", libraryOpen ? "block" : "hidden md:block")}>
       <Sidebar
           projects={library.projects}
           assets={library.assets}
           smartCollections={library.smartCollections}
           selectedProject={selectedProject}
-          onSelectProject={(project) => {
-            setSelectedProject(project);
-            setFilters(EMPTY_FILTERS);
-          }}
-          onSelectCollection={(ids) => {
-            setSelectedProject("All Projects");
-            setSelectedAssetId(ids[0] ?? null);
+          onSelectProject={selectProject}
+          selectedCollection={collection}
+          onSelectCollection={(name) => {
+            selectProject("All Projects"); setCollection(name);
           }}
           onRenameProject={renameProject}
           onDeleteProject={deleteProject}
           onSelectGroup={(project, filter: GroupFilter) => {
-            setSelectedProject(project);
+            selectProject(project);
             setFilters({ ...EMPTY_FILTERS, ...filter });
           }}
         />
-
-      <main className="flex-1 space-y-6 overflow-y-auto p-6">
+      </div>
+      <main className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4 lg:p-6">
+          <Button className="md:hidden" size="sm" aria-expanded={libraryOpen} onClick={() => setLibraryOpen(!libraryOpen)}>Library</Button>
           <Header
             theme={theme}
             toggleTheme={toggleTheme}
@@ -375,23 +358,42 @@ export default function App() {
             projectNames={projectNames}
           />
 
+          {error && <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm">
+            <span>{error}</span><Button size="sm" variant="ghost" onClick={() => setError("")}>Dismiss</Button>
+          </div>}
+          {busy > 0 && <p role="status" className="text-xs text-muted-foreground">Saving changes…</p>}
           <ViewTabs active={activeView} onChange={setActiveView} />
 
-          <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+          <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
             <motion.div
               key={activeView}
-              className="space-y-6"
+              className="min-w-0 space-y-4"
               initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.22, ease: EASE_OUT }}
             >
+              <Suspense fallback={<Card className="p-4" role="status">Loading view…</Card>}>
               {activeView === "workspace" ? (
                 <>
-                  <ProjectOverview library={library} />
-                  {focusProject && <ProjectHealthPanel project={focusProject} />}
+                  <Card className="p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div><p className="text-xs font-medium uppercase tracking-widest text-accent">Your workspace</p>
+                        <h2 className="mt-1 text-xl font-semibold">{scopeLabel}</h2>
+                        <p className="mt-1 text-sm text-muted-foreground">{scopedAssets.length} files · {openTasks} open tasks{collection ? " across the library" : ""}</p>
+                      </div>
+                      <Button size="sm" variant="soft" onClick={() => setRailTab("tasks")}>View tasks</Button>
+                    </div>
+                    {!collection && scopedTasks.find(t => t.status !== "Done") && <p className="mt-3 border-t border-border pt-3 text-sm text-foreground-secondary">
+                      <span className="font-medium text-foreground">Next up: </span>{scopedTasks.find(t => t.status !== "Done")?.description}
+                    </p>}
+                  </Card>
+                  {selectedProject === "All Projects" && !collection && <details className="rounded-lg border border-border bg-card p-3">
+                    <summary className="cursor-pointer text-sm font-medium">Browse projects <span className="ml-1 text-muted-foreground">({library.projects.length})</span></summary>
+                    <ProjectOverview library={library} onSelect={selectProject} />
+                  </details>}
                   <Card className="p-4">
                     <SectionTitle
-                      title="File Intelligence"
+                      title="Files"
                       subtitle="Sort, filter, tag, and organize project files."
                       actions={
                         <div className="flex items-center gap-1 rounded-md border border-border bg-muted/50 p-0.5">
@@ -430,6 +432,7 @@ export default function App() {
                       />
                     )}
                   </Card>
+                  {focusProject && <details className="rounded-lg border border-border bg-card p-3"><summary className="cursor-pointer text-sm font-medium">Readiness checklist · {focusProject.health.checks.filter(c => c.ok).length} of {focusProject.health.checks.length} checks</summary><ProjectHealthPanel project={focusProject} /></details>}
                   <Inspector
                     asset={selectedAsset}
                     accent={accent}
@@ -449,9 +452,15 @@ export default function App() {
               ) : (
                 <PipelineView pipeline={pipeline} />
               )}
+              </Suspense>
             </motion.div>
 
-            <aside className="space-y-6 xl:sticky xl:top-6">
+            <aside className="min-w-0 space-y-3 xl:sticky xl:top-4">
+              <div className="flex gap-1 rounded-lg border border-border bg-card p-1" aria-label="Assistant panel">
+                <Button className="flex-1" size="sm" variant={railTab === "assistant" ? "soft" : "ghost"} aria-pressed={railTab === "assistant"} onClick={() => setRailTab("assistant")}>Assistant</Button>
+                <Button className="flex-1" size="sm" variant={railTab === "tasks" ? "soft" : "ghost"} aria-pressed={railTab === "tasks"} onClick={() => setRailTab("tasks")}>Tasks · {openTasks}</Button>
+              </div>
+              <div hidden={railTab !== "assistant"} className="space-y-3">
               <ChatPanel
                 question={chatQuestion}
                 setQuestion={setChatQuestion}
@@ -461,11 +470,14 @@ export default function App() {
                 aiStatus={aiStatus}
                 scope={selectedProject}
               />
-              <QualityPanel quality={chatQuality} validation={validation} />
-              <TasksPanel projects={library.projects} scope={selectedProject} onUpdateTask={updateTask} />
+              <details className="rounded-lg border border-border bg-card p-3"><summary className="cursor-pointer text-sm text-muted-foreground">Answer checks & provenance</summary><QualityPanel quality={chatQuality} validation={validation} /></details>
+              </div>
+              <div hidden={railTab !== "tasks"} className="max-h-[70vh] overflow-y-auto"><TasksPanel projects={library.projects} scope={selectedProject} onUpdateTask={updateTask} /></div>
             </aside>
           </div>
       </main>
+    </div>
+    <Player assets={library.assets} selected={library.assets.find(a => a.id === selectedAssetId)} />
 
       <ContextMenu menu={fileMenu} onClose={() => setFileMenu(null)} />
       <ConfirmDialog
@@ -474,7 +486,7 @@ export default function App() {
         message={
           <>
             <span className="font-medium text-foreground">{assetToDelete?.file_name}</span> will be
-            permanently removed from disk and the library. This cannot be undone.
+            removed from the library. A recovery copy will be retained in the local data folder.
           </>
         }
         onConfirm={() => {
@@ -576,45 +588,21 @@ function Header({
   );
 }
 
-function ProjectOverview({ library }: { library: LibraryResponse }) {
-  if (!library.projects.length) return null;
-  return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-      {library.projects.map((project) => (
-        <motion.div key={project.project_name} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-          <Card className="flex h-full flex-col overflow-hidden">
-            <div className="relative h-24 w-full shrink-0 overflow-hidden border-b border-border bg-gradient-to-br from-accent/25 via-accent/5 to-elevated">
-              {project.artwork ? (
-                <img src={project.artwork} alt={project.project_name} className="h-full w-full object-cover" />
-              ) : (
-                <div className="flex h-full items-center justify-center text-accent/25">
-                  <Disc3 className="size-8" />
-                </div>
-              )}
-            </div>
-            <div className="flex flex-1 flex-col p-4">
-              <div className="mb-3 flex items-center justify-between gap-2">
-                <h3 className="truncate font-semibold">{project.project_name}</h3>
-                <Badge tone="accent">{Math.round(project.progress * 100)}%</Badge>
-              </div>
-              <div className="grid grid-cols-4 gap-2">
-                <Stat label="Files" value={project.asset_count} />
-                <Stat label="Audio" value={project.audio_count} />
-                <Stat label="MIDI" value={project.midi_count} />
-                <Stat label="Notes" value={project.note_count} />
-              </div>
-              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
-                <div
-                  className="h-full rounded-full bg-accent transition-all"
-                  style={{ width: `${Math.max(project.progress * 100, 2)}%` }}
-                />
-              </div>
-            </div>
-          </Card>
-        </motion.div>
-      ))}
-    </div>
-  );
+function ProjectOverview({ library, onSelect }: { library: LibraryResponse; onSelect: (name: string) => void }) {
+  return <div className="mt-3 grid gap-2 sm:grid-cols-2 2xl:grid-cols-3">
+    {library.projects.map(project => {
+      const done = project.tasks.filter(t => t.status === "Done").length;
+      const next = project.tasks.find(t => t.status !== "Done");
+      return <button key={project.project_name} onClick={() => onSelect(project.project_name)}
+        className="flex min-w-0 items-center gap-3 rounded-md border border-border bg-background/40 p-3 text-left transition-colors hover:border-accent/40 focus-visible:outline-2 focus-visible:outline-accent">
+        {project.artwork ? <img src={project.artwork} alt="" className="size-12 shrink-0 rounded-md object-cover" loading="lazy" /> : <Disc3 className="size-8 shrink-0 text-accent/50" />}
+        <div className="min-w-0"><p className="truncate text-sm font-semibold">{project.project_name}</p>
+          <p className="mt-1 text-xs text-muted-foreground">{project.asset_count} files · {project.tasks.length ? `${done} of ${project.tasks.length} tasks done` : "No tasks yet"}</p>
+          {next && <p className="mt-1 truncate text-xs text-foreground-secondary">Next: {next.description}</p>}
+        </div>
+      </button>;
+    })}
+  </div>;
 }
 
 function FiltersPanel({
@@ -628,8 +616,8 @@ function FiltersPanel({
 }) {
   const keys = Array.from(new Set(assets.map((a) => a.key).filter(Boolean))) as string[];
   return (
-    <div className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-6">
-      <div className="relative md:col-span-2">
+    <div className="mt-4 flex flex-wrap gap-2">
+      <div className="relative min-w-40 flex-[2_1_12rem]">
         <Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" />
         <input
           className="input has-icon"
@@ -639,7 +627,8 @@ function FiltersPanel({
         />
       </div>
       <select
-        className="input"
+        className="input min-w-28 flex-1"
+        aria-label="File type"
         value={filters.types[0] ?? ""}
         onChange={(event) => setFilters({ ...filters, types: event.target.value ? [event.target.value] : [] })}
       >
@@ -647,9 +636,11 @@ function FiltersPanel({
         <option>Audio</option>
         <option>MIDI</option>
         <option>Notes</option>
+        <option>Image</option>
       </select>
       <select
-        className="input"
+        className="input min-w-28 flex-1"
+        aria-label="File status"
         value={filters.statuses[0] ?? ""}
         onChange={(event) =>
           setFilters({ ...filters, statuses: event.target.value ? [event.target.value as FileStatus] : [] })
@@ -661,7 +652,8 @@ function FiltersPanel({
         ))}
       </select>
       <select
-        className="input"
+        className="input min-w-28 flex-1"
+        aria-label="Musical key"
         value={filters.key}
         onChange={(event) => setFilters({ ...filters, key: event.target.value })}
       >
@@ -671,7 +663,7 @@ function FiltersPanel({
         ))}
       </select>
       <input
-        className="input"
+        className="input min-w-28 flex-1"
         placeholder="Tag"
         value={filters.tag}
         onChange={(event) => setFilters({ ...filters, tag: event.target.value })}
@@ -702,7 +694,7 @@ function AssetTable({
         cell: ({ row }) => (
           <div className="flex items-center gap-2">
             <TypeIcon type={row.original.display_type} />
-            <span className="truncate font-medium text-foreground">{row.original.file_name}</span>
+            <span title={row.original.file_name} className="max-w-48 truncate font-medium text-foreground">{row.original.file_name}</span>
           </div>
         )
       },
@@ -753,13 +745,13 @@ function AssetTable({
   }
 
   return (
-    <div className="mt-4 overflow-hidden rounded-md border border-border">
+    <div className="mt-4 overflow-x-auto rounded-md border border-border">
       <table className="w-full text-left text-sm text-foreground-secondary">
         <thead className="bg-muted/60 text-xs uppercase tracking-wide text-muted-foreground">
           {table.getHeaderGroups().map((headerGroup) => (
             <tr key={headerGroup.id}>
               {headerGroup.headers.map((header) => (
-                <th key={header.id} className="px-3 py-2.5 font-medium">
+                <th key={header.id} className={cn("px-3 py-2.5 font-medium", header.column.id === "tags" && "hidden 2xl:table-cell")}>
                   <button
                     className="flex items-center gap-1 hover:text-foreground"
                     onClick={header.column.getToggleSortingHandler()}
@@ -776,6 +768,9 @@ function AssetTable({
           {table.getRowModel().rows.map((row) => (
             <tr
               key={row.original.id}
+              tabIndex={0}
+              aria-label={`Inspect ${row.original.file_name}`}
+              onKeyDown={event => { if (event.target === event.currentTarget && event.key === "Enter") onSelect(row.original.id); }}
               onClick={() => onSelect(row.original.id)}
               onContextMenu={(event) => onContext(event, row.original)}
               className={cn(
@@ -784,7 +779,7 @@ function AssetTable({
               )}
             >
               {row.getVisibleCells().map((cell) => (
-                <td key={cell.id} className="px-3 py-2.5 align-middle">
+                <td key={cell.id} className={cn("px-3 py-2.5 align-middle", cell.column.id === "tags" && "hidden 2xl:table-cell")}>
                   {flexRender(cell.column.columnDef.cell, cell.getContext())}
                 </td>
               ))}
@@ -849,7 +844,7 @@ function Inspector({
   asset?: SessionAsset;
   accent: string;
   projectNames: string[];
-  onUpdate: (asset: SessionAsset, update: Partial<Pick<SessionAsset, "status" | "tags" | "project_name" | "note">>) => void;
+  onUpdate: (asset: SessionAsset, update: Partial<Pick<SessionAsset, "status" | "tags" | "project_name" | "note">>) => Promise<boolean>;
   onDelete: (asset: SessionAsset) => void;
 }) {
   if (!asset) {
@@ -860,10 +855,6 @@ function Inspector({
       </Card>
     );
   }
-  const energyData = asset.audio?.energy_series.map((value, index) => ({ index, value })) ?? [];
-  const centroidData = asset.audio?.spectral_centroid_series.map((value, index) => ({ index, value })) ?? [];
-  const pitchData = Object.entries(asset.midi?.pitch_distribution ?? {}).map(([pitch, count]) => ({ pitch, count }));
-
   return (
     <Card className="space-y-5 p-4">
       <div className="flex items-start justify-between gap-3">
@@ -877,6 +868,11 @@ function Inspector({
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {asset.file_missing && (
+            <Badge tone="red" title="The stored file is gone; playback will fail until it is restored or re-uploaded.">
+              File missing
+            </Badge>
+          )}
           <Badge tone={STATUS_TONE[asset.status]}>{asset.status}</Badge>
           <Button
             variant="ghost"
@@ -916,7 +912,7 @@ function Inspector({
         />
       )}
 
-      <NotesEditor asset={asset} onSave={(note) => onUpdate(asset, { note })} />
+      <NotesEditor key={asset.id} asset={asset} onSave={(note) => onUpdate(asset, { note })} />
 
       {asset.audio?.codec && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -927,180 +923,50 @@ function Inspector({
         </div>
       )}
 
-      {asset.media_url && asset.display_type === "Audio" && (
-        <Waveform url={asset.media_url} beats={asset.audio?.beat_positions ?? []} accent={accent} />
-      )}
-      {energyData.length > 0 && <MiniArea title="Energy over time" data={energyData} accent={accent} />}
-      {centroidData.length > 0 && <MiniArea title="Brightness over time" data={centroidData} accent={accent} />}
-      {pitchData.length > 0 && (
-        <ChartBlock title="MIDI pitch distribution">
-          <ResponsiveContainer width="100%" height={180}>
-            <BarChart data={pitchData}>
-              <CartesianGrid stroke="var(--border)" vertical={false} />
-              <XAxis dataKey="pitch" tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} />
-              <YAxis tick={{ fill: "var(--muted-foreground)", fontSize: 10 }} />
-              <Tooltip
-                contentStyle={{
-                  background: "var(--elevated)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 8,
-                  color: "var(--foreground)"
-                }}
-              />
-              <Bar dataKey="count" fill={accent} radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </ChartBlock>
-      )}
+      {(asset.audio || asset.midi) && <AnalysisSection asset={asset} accent={accent} />}
+
     </Card>
   );
 }
 
-function NotesEditor({ asset, onSave }: { asset: SessionAsset; onSave: (note: string) => void }) {
-  const [note, setNote] = useState(asset.note ?? "");
-  useEffect(() => setNote(asset.note ?? ""), [asset.id, asset.note]);
+function AnalysisSection({ asset, accent }: { asset: SessionAsset; accent: string }) {
+  const [open, setOpen] = useState(false);
+  return <details onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary className="cursor-pointer text-sm font-medium">Audio & MIDI analysis</summary>
+    {open && <Suspense fallback={<p role="status" className="p-3 text-sm text-muted-foreground">Loading charts…</p>}><AnalysisCharts asset={asset} accent={accent} /></Suspense>}
+  </details>;
+}
+
+function NotesEditor({ asset, onSave }: { asset: SessionAsset; onSave: (note: string) => Promise<boolean> }) {
+  const storageKey = `sessioniq-draft:${asset.id}`;
+  const [note, setNote] = useState(() => {
+    try { return localStorage.getItem(storageKey) ?? asset.note ?? ""; }
+    catch { return asset.note ?? ""; }
+  });
+  const [saving, setSaving] = useState(false);
   const dirty = note !== (asset.note ?? "");
-  return (
-    <div>
-      <div className="mb-1.5 flex items-center justify-between">
-        <h3 className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
-          <StickyNote className="size-4" /> Notes
-        </h3>
-        {dirty && (
-          <Button variant="soft" size="sm" onClick={() => onSave(note)}>
-            Save
-          </Button>
-        )}
-      </div>
-      <textarea
-        className="input min-h-20 resize-y"
-        placeholder="Mixing notes, ideas, to-dos… (added to the assistant's context)"
-        value={note}
-        onChange={(event) => setNote(event.target.value)}
-      />
+  async function save() {
+    if (saving) return;
+    setSaving(true);
+    if (await onSave(note)) {
+      try { localStorage.removeItem(storageKey); } catch { /* Storage can be disabled. */ }
+    }
+    setSaving(false);
+  }
+  return <div>
+    <div className="mb-2 flex items-center justify-between gap-2">
+      <h3 className="flex items-center gap-1.5 text-sm font-medium"><StickyNote className="size-4" /> Notes</h3>
+      {dirty && <Button variant="soft" size="sm" disabled={saving} onClick={() => void save()}>{saving ? "Saving…" : "Save notes"}</Button>}
     </div>
-  );
-}
-
-function Waveform({ url, beats, accent }: { url: string; beats: number[]; accent: string }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const waveRef = useRef<WaveSurfer | null>(null);
-  const [playing, setPlaying] = useState(false);
-  const [volume, setVolume] = useState(1);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    waveRef.current?.destroy();
-    const styles = getComputedStyle(document.documentElement);
-    const wave = WaveSurfer.create({
-      container: containerRef.current,
-      waveColor: styles.getPropertyValue("--muted-foreground").trim() || "#64748b",
-      progressColor: accent,
-      cursorColor: styles.getPropertyValue("--foreground").trim() || "#f8fafc",
-      height: 84,
-      barWidth: 2,
-      barGap: 1,
-      barRadius: 2,
-      url
-    });
-    wave.on("finish", () => setPlaying(false));
-    wave.once("ready", () => wave.setVolume(volume));
-    waveRef.current = wave;
-    return () => wave.destroy();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, accent]);
-
-  return (
-    <div className="rounded-md border border-border bg-background/40 p-3">
-      <div ref={containerRef} />
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <Button
-            variant="soft"
-            size="sm"
-            onClick={() => {
-              waveRef.current?.playPause();
-              setPlaying((p) => !p);
-            }}
-          >
-            {playing ? "Pause" : "Play"}
-          </Button>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                const next = volume > 0 ? 0 : 1;
-                setVolume(next);
-                waveRef.current?.setVolume(next);
-              }}
-              className="text-muted-foreground hover:text-foreground"
-              aria-label={volume > 0 ? "Mute" : "Unmute"}
-            >
-              {volume > 0 ? <Volume2 className="size-4" /> : <VolumeX className="size-4" />}
-            </button>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={volume}
-              onChange={(event) => {
-                const next = Number(event.target.value);
-                setVolume(next);
-                waveRef.current?.setVolume(next);
-              }}
-              className="h-1 w-24 cursor-pointer accent-accent"
-              aria-label="Volume"
-            />
-          </div>
-        </div>
-        <span className="text-xs text-muted-foreground">{beats.length} beat markers detected</span>
-      </div>
-    </div>
-  );
-}
-
-function MiniArea({ title, data, accent }: { title: string; data: any[]; accent: string }) {
-  return (
-    <ChartBlock title={title}>
-      <ResponsiveContainer width="100%" height={140}>
-        <AreaChart data={data}>
-          <defs>
-            <linearGradient id={`grad-${title.replace(/\s/g, "")}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={accent} stopOpacity={0.35} />
-              <stop offset="100%" stopColor={accent} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid stroke="var(--border)" vertical={false} />
-          <XAxis dataKey="index" hide />
-          <YAxis hide />
-          <Tooltip
-            contentStyle={{
-              background: "var(--elevated)",
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-              color: "var(--foreground)"
-            }}
-          />
-          <Area
-            type="monotone"
-            dataKey="value"
-            stroke={accent}
-            strokeWidth={2}
-            fill={`url(#grad-${title.replace(/\s/g, "")})`}
-          />
-        </AreaChart>
-      </ResponsiveContainer>
-    </ChartBlock>
-  );
-}
-
-function ChartBlock({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <div>
-      <h3 className="mb-2 text-sm font-medium text-muted-foreground">{title}</h3>
-      {children}
-    </div>
-  );
+    <textarea aria-label={`Notes for ${asset.file_name}`} className="input min-h-24 resize-y" value={note}
+      placeholder="Mix notes, ideas, to-dos… Ctrl+Enter to save."
+      onKeyDown={event => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void save(); } }}
+      onChange={event => {
+        setNote(event.target.value);
+        try { localStorage.setItem(storageKey, event.target.value); } catch { /* Keep the in-memory draft. */ }
+      }} />
+    {dirty && <p className="mt-1 text-xs text-warning">Unsaved changes — save to update tasks and assistant context.</p>}
+  </div>;
 }
 
 function ChatPanel({
@@ -1136,15 +1002,15 @@ function ChatPanel({
         }
       />
       <p className="mt-1 text-xs text-muted-foreground">
-        Source-grounded answers scoped to <span className="text-foreground">{scope}</span>.
+        Source-cited answers scoped to <span className="text-foreground">{scope}</span>.
       </p>
 
       {aiStatus?.hints?.length > 0 && (
-        <div className="mt-3 space-y-1 rounded-md border border-warning/25 bg-[color-mix(in_oklab,var(--warning)_8%,transparent)] p-2 text-xs text-muted-foreground">
+        <details className="mt-3 rounded-md border border-border p-2 text-xs text-muted-foreground"><summary className="cursor-pointer">Optional AI setup</summary><div className="mt-2 space-y-2">
           {aiStatus.hints.map((hint: string) => (
             <p key={hint}>{hint}</p>
           ))}
-        </div>
+        </div></details>
       )}
 
       <div className="mt-3">
@@ -1354,12 +1220,12 @@ function ProjectHealthPanel({ project }: { project: ProjectSummary }) {
     <Card className="p-4">
       <SectionTitle
         icon={<HeartPulse className="size-5" />}
-        title="Project Health"
+        title="Readiness checklist"
         subtitle={project.project_name}
         actions={<span className={cn("text-2xl font-semibold tracking-tight", tone)}>{pct}%</span>}
       />
       <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
-        <div className={cn("h-full rounded-full transition-all", barColor)} style={{ width: `${Math.max(pct, 2)}%` }} />
+        <div className={cn("h-full rounded-full transition-all", barColor)} style={{ width: `${pct}%` }} />
       </div>
       <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
         {health.checks.map((check) => (
@@ -1423,7 +1289,7 @@ function QualityPanel({ quality, validation }: { quality?: QualityReport; valida
         title="Quality Report"
         actions={
           <Badge tone={quality.grounded ? "green" : "red"}>
-            {quality.grounded ? "grounded" : "ungrounded"}
+            {quality.grounded ? "checks passed" : "review needed"}
           </Badge>
         }
       />
@@ -1434,6 +1300,7 @@ function QualityPanel({ quality, validation }: { quality?: QualityReport; valida
         <Stat label="Files cited" value={quality.files_cited} />
       </div>
 
+      <p className="mt-3 text-xs text-muted-foreground">Automated checks do not verify every claim or measure hallucination risk. Review the cited sources.</p>
       <div className="mt-3 space-y-1.5">
         {quality.checks.map((check) => (
           <div key={check.label} className="flex items-center gap-2 text-sm">

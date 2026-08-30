@@ -45,6 +45,8 @@ export type SessionAsset = {
   project_name: string;
   stored_path?: string | null;
   media_url?: string | null;
+  /** True when the stored file no longer exists on disk (relink/recovery needed). */
+  file_missing?: boolean;
   status: FileStatus;
   tags: AssetTag[];
   date_added?: string | null;

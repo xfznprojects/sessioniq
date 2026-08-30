@@ -26,7 +26,7 @@ def test_safe_upload_path_uses_project_folder_and_avoids_collisions(tmp_path):
 
     second = safe_upload_path("Vivien Remix", "../track.wav", root=tmp_path)
 
-    assert first.parent.name == "vivien-remix"
+    assert first.parent.name.startswith("vivien-remix--")
     assert first.name == "track.wav"
     assert second.name == "track-2.wav"
 
@@ -41,7 +41,8 @@ def test_nested_upload_path_creates_song_folder(tmp_path):
     from sessioniq.project_workspace import safe_upload_path as sup
 
     path = sup("Summer EP/Intro", "loop.wav", root=tmp_path)
-    assert path.parent == tmp_path / "summer-ep" / "intro"
+    assert path.parent.parent == tmp_path / "summer-ep"
+    assert path.parent.name.startswith("intro--")
     assert path.name == "loop.wav"
 
 
@@ -52,7 +53,7 @@ def test_move_stored_file_relocates_and_cleans_empty_source(tmp_path):
     moved = move_stored_file(str(source), "New Project", root=tmp_path)
 
     assert moved is not None
-    moved_path = tmp_path / "new-project" / "loop.wav"
+    moved_path = Path(moved)
     assert moved_path.exists()
     assert not source.exists()
     assert not source.parent.exists()  # empty old folder is removed
@@ -66,7 +67,8 @@ def test_move_stored_file_avoids_overwriting_existing_name(tmp_path):
 
     moved = move_stored_file(str(source), "New Project", root=tmp_path)
 
-    assert moved == str(tmp_path / "new-project" / "loop-2.wav")
+    assert Path(moved).parent == existing.parent
+    assert Path(moved).name == "loop-2.wav"
     assert existing.read_bytes() == b"first"
 
 
@@ -85,7 +87,8 @@ def test_rename_project_files_moves_every_asset(tmp_path):
 
     moved = rename_project_files(paths, "Final Mix", root=tmp_path)
 
-    assert all((tmp_path / "final-mix" / Path(path).name).exists() for path in moved)
+    assert all(Path(path).exists() for path in moved)
+    assert all(Path(path).parent.name.startswith("final-mix--") for path in moved)
 
 
 def test_summarize_projects_counts_assets_and_progress():

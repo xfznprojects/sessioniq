@@ -34,6 +34,7 @@ class AssetTag(BaseModel):
 
 
 class Citation(BaseModel):
+    asset_id: str | None = None
     file_name: str
     evidence: str
 
@@ -95,6 +96,7 @@ class TaskStatus(StrEnum):
 
 class ProjectTask(BaseModel):
     id: str
+    asset_id: str | None = None
     project_name: str
     description: str
     source_file: str

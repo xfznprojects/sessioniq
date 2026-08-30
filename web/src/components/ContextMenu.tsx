@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import type { ReactNode } from "react";
-import { useEffect } from "react";
+import { useEffect, useId, useRef } from "react";
 
 import { Button } from "./ui";
 import { cn, EASE_OUT } from "../lib/utils";
@@ -92,45 +92,24 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
   useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onCancel();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onCancel]);
+    const element = dialog.current;
+    if (!element) return;
+    if (open && !element.open) { element.showModal(); cancel.current?.focus(); }
+    else if (!open && element.open) element.close();
+  }, [open]);
 
-  return (
-    <AnimatePresence>
-      {open && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-            onClick={onCancel}
-          />
-          <motion.div
-            initial={{ opacity: 0, scale: 0.96, y: 8 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.97, y: 4 }}
-            transition={{ duration: 0.18, ease: EASE_OUT }}
-            className="relative w-full max-w-sm rounded-lg border border-border bg-card p-5 elevate-lg"
-          >
-            <h2 className="text-base font-semibold tracking-tight">{title}</h2>
-            <div className="mt-2 text-sm text-muted-foreground">{message}</div>
-            <div className="mt-5 flex justify-end gap-2">
-              <Button variant="ghost" onClick={onCancel}>
-                Cancel
-              </Button>
-              <Button variant="danger" onClick={onConfirm}>
-                {confirmLabel}
-              </Button>
-            </div>
-          </motion.div>
-        </div>
-      )}
-    </AnimatePresence>
-  );
+  return <dialog ref={dialog} aria-labelledby={titleId}
+    onCancel={event => { event.preventDefault(); onCancel(); }}
+    className="m-auto w-[calc(100%-2rem)] max-w-sm rounded-lg border border-border bg-card p-5 text-foreground shadow-xl backdrop:bg-black/60">
+    <h2 id={titleId} className="text-base font-semibold">{title}</h2>
+    <div className="mt-2 text-sm text-muted-foreground">{message}</div>
+    <div className="mt-5 flex justify-end gap-2">
+      <button ref={cancel} className="rounded-md px-3 py-2 text-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-accent" onClick={onCancel}>Cancel</button>
+      <Button variant="danger" onClick={onConfirm}>{confirmLabel}</Button>
+    </div>
+  </dialog>;
 }

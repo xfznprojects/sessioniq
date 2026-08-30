@@ -41,9 +41,17 @@ def project_slug(project_name: str) -> str:
 
 
 def safe_upload_path(project_name: str, file_name: str, root: Path = UPLOAD_ROOT) -> Path:
-    project_dir = root / project_slug(project_name)
+    # Keep existing stored paths valid, but isolate new uploads even when display
+    # names slug to the same spelling (including on case-insensitive filesystems).
+    name = "/".join(part.strip() for part in project_name.split("/") if part.strip())
+    identity = hashlib.sha256((name or "Unassigned").encode()).hexdigest()[:16]
+    project_dir = root / f"{project_slug(project_name)}--{identity}"
     project_dir.mkdir(parents=True, exist_ok=True)
-    file_path = project_dir / Path(file_name).name
+    basename = Path(file_name.replace("\\", "/")).name
+    if basename in {"", ".", ".."} or ":" in basename:
+        raise ValueError("Invalid upload filename.")
+    file_path = project_dir / basename
+    file_path.resolve().relative_to(root.resolve())
     if not file_path.exists():
         return file_path
 
@@ -71,6 +79,7 @@ def move_stored_file(
     if not stored_path:
         return stored_path
     source = Path(stored_path)
+    source.resolve().relative_to(root.resolve())
     destination = safe_upload_path(new_project_name, source.name, root=root)
     if source.resolve() == destination.resolve():
         return str(source)
@@ -104,7 +113,7 @@ def summarize_projects(
     assets: list[ProjectAsset],
     status_overrides: dict[str, str] | None = None,
 ) -> list[ProjectSummary]:
-    overrides = status_overrides or {}
+    overrides = status_overrides if status_overrides is not None else {}
     grouped: dict[str, list[ProjectAsset]] = defaultdict(list)
     for asset in assets:
         grouped[asset.project_name].append(asset)
@@ -132,13 +141,10 @@ def project_health(assets: list[ProjectAsset], tasks: list[ProjectTask]) -> Proj
     has_audio = any(asset.kind == AssetKind.AUDIO for asset in assets)
     has_notes = any(asset.note or asset.text for asset in assets)
     has_reference = any(
-        asset.status == FileStatus.REFERENCE or "ref" in asset.file_name.lower()
-        for asset in assets
+        asset.kind == AssetKind.AUDIO and asset.status == FileStatus.REFERENCE for asset in assets
     )
     has_master = any(
-        asset.status == FileStatus.READY
-        or any(word in asset.file_name.lower() for word in ("master", "export", "final"))
-        for asset in assets
+        asset.kind == AssetKind.AUDIO and asset.status == FileStatus.READY for asset in assets
     )
     open_tasks = [task for task in tasks if task.status != TaskStatus.DONE]
     tasks_clear = not open_tasks
@@ -186,15 +192,11 @@ def smart_collections(assets: list[ProjectAsset]) -> dict[str, list[ProjectAsset
             for asset in assets
             if asset.kind == AssetKind.AUDIO
             and asset.status not in {FileStatus.READY, FileStatus.REFERENCE, FileStatus.ARCHIVED}
-            and not any(
-                word in asset.file_name.lower() for word in ("master", "final", "export")
-            )
+            and not any(word in asset.file_name.lower() for word in ("master", "final", "export"))
         ],
         "Unfinished": [asset for asset in assets if asset.status in unfinished_statuses],
         "Ready to Export": [asset for asset in assets if asset.status == FileStatus.READY],
-        "High BPM (140+)": [
-            asset for asset in assets if (bpm := _asset_bpm(asset)) and bpm >= 140
-        ],
+        "High BPM (140+)": [asset for asset in assets if (bpm := _asset_bpm(asset)) and bpm >= 140],
         "Missing Notes": [asset for asset in assets if not asset.note and not asset.text],
         "Recently Analyzed": sorted(
             [asset for asset in assets if asset.last_analyzed],
@@ -220,12 +222,16 @@ def _project_tasks(
         if asset.text:
             descriptions.extend(asset.text.action_items)
 
-        for description in descriptions:
-            task_id = _task_id(project_name, asset.file_name, description)
+        for description in dict.fromkeys(descriptions):
+            task_id = hashlib.sha256(f"{asset.id}|{description}".encode()).hexdigest()[:20]
+            legacy_id = _task_id(project_name, asset.file_name, description)
+            if task_id not in status_overrides and legacy_id in status_overrides:
+                status_overrides[task_id] = status_overrides[legacy_id]
             status = TaskStatus(status_overrides.get(task_id, TaskStatus.TODO.value))
             tasks.append(
                 ProjectTask(
                     id=task_id,
+                    asset_id=asset.id,
                     project_name=project_name,
                     description=description,
                     source_file=asset.file_name,
