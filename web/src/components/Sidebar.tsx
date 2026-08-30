@@ -79,6 +79,7 @@ export function Sidebar({
   assets,
   smartCollections,
   selectedProject,
+  selectedCollection,
   onSelectProject,
   onSelectCollection,
   onRenameProject,
@@ -89,8 +90,9 @@ export function Sidebar({
   assets: SessionAsset[];
   smartCollections: Record<string, string[]>;
   selectedProject: string;
+  selectedCollection: string | null;
   onSelectProject: (project: string) => void;
-  onSelectCollection: (ids: string[]) => void;
+  onSelectCollection: (name: string) => void;
   onRenameProject: (oldName: string, newName: string) => void;
   onDeleteProject: (path: string) => void;
   onSelectGroup: (project: string, filter: GroupFilter) => void;
@@ -119,14 +121,14 @@ export function Sidebar({
   }
 
   return (
-    <aside className="flex h-full w-72 shrink-0 flex-col border-r border-border bg-surface/60">
+    <aside className="flex h-full w-full md:w-56 shrink-0 flex-col border-r border-border bg-surface/60 lg:w-60">
       <div className="flex items-center gap-2 px-4 py-4 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
         <Library className="size-4 text-accent" /> Library
       </div>
 
       <nav className="flex-1 space-y-1 overflow-y-auto px-3 pb-6">
         <RowButton
-          active={selectedProject === "All Projects"}
+          active={selectedProject === "All Projects" && !selectedCollection}
           onClick={() => onSelectProject("All Projects")}
         >
           <FolderOpen className="size-4" />
@@ -172,7 +174,7 @@ export function Sidebar({
         {openSections.smart &&
           (collectionNames.length ? (
             collectionNames.map((name) => (
-              <RowButton key={name} onClick={() => onSelectCollection(smartCollections[name] ?? [])}>
+              <RowButton key={name} active={selectedCollection === name} onClick={() => onSelectCollection(name)}>
                 <Sparkles className="size-4 text-accent" />
                 <span className="flex-1 truncate text-left">{name}</span>
                 <span className="text-xs text-muted-foreground">{smartCollections[name]?.length ?? 0}</span>
@@ -190,7 +192,7 @@ export function Sidebar({
         message={
           <>
             <span className="font-medium text-foreground">{pendingDelete?.path}</span> and all{" "}
-            {pendingDelete?.count} file(s) inside it will be permanently deleted. This cannot be undone.
+            {pendingDelete?.count} file(s) inside it will be removed from the library. A recovery copy is retained in the local data folder.
           </>
         }
         onConfirm={() => {

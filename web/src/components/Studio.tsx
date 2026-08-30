@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 
 import { Badge, Button, Card, SectionTitle, Stat } from "./ui";
 import type { SessionAsset } from "../types";
+import { requestJson } from "../lib/api";
 
 export function StudioView({ assets }: { assets: SessionAsset[] }) {
   return (
@@ -16,26 +17,31 @@ export function StudioView({ assets }: { assets: SessionAsset[] }) {
 function AIMemory() {
   const [memory, setMemory] = useState<any>(null);
   const [draft, setDraft] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    fetch("/api/memory").then((r) => r.json()).then(setMemory).catch(() => setMemory(null));
+    requestJson("/api/memory").then(setMemory).catch(error => setError(error.message));
   }, []);
 
   async function save(preferences: string[]) {
-    const updated = await (
-      await fetch("/api/memory", {
+    if (saving) return;
+    setSaving(true); setError("");
+    try {
+      const updated = await requestJson("/api/memory", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ preferences })
-      })
-    ).json();
-    setMemory(updated);
+      });
+      setMemory(updated); setDraft("");
+    } catch (error) { setError(error instanceof Error ? error.message : "Could not save preferences."); }
+    finally { setSaving(false); }
   }
 
   if (!memory) {
     return (
       <Card className="p-4">
-        <SectionTitle icon={<Brain className="size-5" />} title="AI Memory" subtitle="Loading…" />
+        <SectionTitle icon={<Brain className="size-5" />} title="AI Memory" subtitle={error || "Loading…"} />
       </Card>
     );
   }
@@ -49,6 +55,8 @@ function AIMemory() {
         title="AI Memory"
         subtitle="Your creative fingerprint — derived from the library and remembered across sessions."
       />
+      {error && <p role="alert" className="mt-3 text-sm text-danger">{error}</p>}
+      {saving && <p role="status" className="mt-2 text-xs text-muted-foreground">Saving preferences…</p>}
 
       <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Stat label="Files" value={memory.stats.files} />
@@ -80,6 +88,7 @@ function AIMemory() {
             >
               {pref}
               <button
+                disabled={saving}
                 onClick={() => save(prefs.filter((p) => p !== pref))}
                 aria-label={`Remove ${pref}`}
                 className="hover:text-foreground"
@@ -103,16 +112,15 @@ function AIMemory() {
             onKeyDown={(event) => {
               if (event.key === "Enter" && draft.trim()) {
                 save([...prefs, draft.trim()]);
-                setDraft("");
               }
             }}
           />
           <Button
             variant="soft"
+            disabled={saving || !draft.trim()}
             onClick={() => {
               if (draft.trim()) {
                 save([...prefs, draft.trim()]);
-                setDraft("");
               }
             }}
           >
