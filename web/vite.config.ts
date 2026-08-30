@@ -5,8 +5,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/api": "http://127.0.0.1:8000",
-      "/uploads": "http://127.0.0.1:8000"
+      "/api": process.env.SESSIONIQ_API_TARGET ?? "http://127.0.0.1:8000",
+      "/uploads": process.env.SESSIONIQ_API_TARGET ?? "http://127.0.0.1:8000"
     }
   }
 });

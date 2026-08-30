@@ -1,28 +1,34 @@
 from __future__ import annotations
 
-import contextlib
+import copy
 import json
+import logging
 import shutil
 import time
+from collections import defaultdict
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
+from threading import RLock
 from typing import Annotated
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from sessioniq.assistant import PROMPT_VERSION, GroundedAssistant, llm_status
-from sessioniq.ingestion import ingest_file, supported_upload_types
+from sessioniq.ingestion import ingest_file, supported_extensions, supported_upload_types
 from sessioniq.insights import producer_profile, similar_assets
 from sessioniq.models import AssetKind, AssetTag, FileStatus, ProjectAsset, TaskStatus
+from sessioniq.persistence import mark_known_good, save_index
 from sessioniq.plugins import plugin_registry
 from sessioniq.project_workspace import (
     UPLOAD_ROOT,
     move_stored_file,
-    project_slug,
     safe_upload_path,
     smart_collections,
     summarize_projects,
@@ -52,22 +58,248 @@ PREFERENCES: list[str] = []
 LAST_ANSWER_SOURCES: list = []
 LAST_ANSWER = None
 RETRIEVER = HybridRetriever(persist_directory=UPLOAD_ROOT.parent / "chroma")
+STATE_LOCK = RLock()
+FILE_MOVES: list[tuple[Path, Path]] = []
+ASSET_UNDO: dict[str, dict] = {}
+_MUTATION_ACTIVE = False  # Read and written only while holding STATE_LOCK.
+STAGING_ROOT = UPLOAD_ROOT.parent / "staging"
+STAGING_MAX_AGE_SECONDS = 24 * 3600
+# Matches the note cap in ProjectAsset.compact_metadata; the index is storage,
+# not an analysis cache, so long MIDI note lists are truncated on save.
+MAX_STORED_NOTES = 32
+logger = logging.getLogger(__name__)
+
+
+def synchronized(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with STATE_LOCK:
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+def _asset_field_snapshot(asset: ProjectAsset) -> dict:
+    """Flat snapshot of the fields endpoints may mutate in place.
+
+    Nested analysis models (audio/midi/text) are written once at ingest and
+    never mutated afterwards, so deep-copying them for every mutation — the
+    previous whole-library snapshot — was pure overhead at scale.
+    """
+    return {
+        "status": asset.status,
+        "tags": list(asset.tags),
+        "note": asset.note,
+        "stored_path": asset.stored_path,
+        "project_name": asset.project_name,
+        "file_name": asset.file_name,
+    }
+
+
+def _restore_assets(original_assets: list[ProjectAsset]) -> None:
+    """Undo list membership plus field changes from a failed mutation."""
+    ASSETS[:] = original_assets
+    for asset in original_assets:
+        undo = ASSET_UNDO.get(asset.id)
+        if undo:
+            asset.status = undo["status"]
+            asset.tags = undo["tags"]
+            asset.note = undo["note"]
+            asset.stored_path = undo["stored_path"]
+            asset.project_name = undo["project_name"]
+            asset.file_name = undo["file_name"]
+
+
+def mutation(function):
+    """Serialize mutations and roll back files/state if the index cannot commit."""
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        global _MUTATION_ACTIVE
+
+        with STATE_LOCK:
+            if _MUTATION_ACTIVE:
+                # RLock permits re-entry, but nested commits would discard the
+                # outer mutation's recovery journal and commit partial state.
+                raise RuntimeError("Nested mutations are not supported")
+            # Cheap snapshots: flat per-asset field records instead of
+            # deep-copying the whole library (see _asset_field_snapshot).
+            original_assets = list(ASSETS)
+            ASSET_UNDO.clear()
+            ASSET_UNDO.update(
+                {asset.id: _asset_field_snapshot(asset) for asset in original_assets}
+            )
+            original_statuses = dict(TASK_STATUSES)
+            original_order = list(PROJECT_ORDER)
+            original_preferences = list(PREFERENCES)
+            FILE_MOVES.clear()
+            _MUTATION_ACTIVE = True
+            try:
+                result = function(*args, **kwargs)
+                _save_library_index()
+                return result
+            except Exception as original_error:
+                try:
+                    for source, destination in reversed(FILE_MOVES):
+                        try:
+                            if destination.exists():
+                                source.parent.mkdir(parents=True, exist_ok=True)
+                                destination.replace(source)
+                        except OSError as rollback_error:
+                            # A locked file must not block other restores or mask
+                            # the original failure. Leave its bytes for recovery.
+                            detail = (
+                                f"Manual recovery required: could not restore "
+                                f"'{destination}' to '{source}': {rollback_error}"
+                            )
+                            original_error.add_note(detail)
+                            logger.error(detail, exc_info=True)
+                finally:
+                    _restore_assets(original_assets)
+                    TASK_STATUSES.clear()
+                    TASK_STATUSES.update(original_statuses)
+                    PROJECT_ORDER[:] = original_order
+                    PREFERENCES[:] = original_preferences
+                    RETRIEVER.assets = list(ASSETS)
+                    # A failed mutation may have updated optional vectors. Use lexical
+                    # retrieval until restart rebuilds them from the committed index.
+                    RETRIEVER._collection = None
+                raise
+            finally:
+                FILE_MOVES.clear()
+                ASSET_UNDO.clear()
+                _MUTATION_ACTIVE = False
+
+    return wrapped
+
+
+def _move_asset(asset: ProjectAsset, target: str) -> None:
+    original = Path(asset.stored_path) if asset.stored_path else None
+    moved = move_stored_file(asset.stored_path, target)
+    if original and moved and original != Path(moved) and Path(moved).exists():
+        FILE_MOVES.append((original, Path(moved)))
+    asset.stored_path = moved
+    asset.project_name = target
+
+
+def _trash_assets(assets: list[ProjectAsset]) -> None:
+    """Remove only owned files; legacy projects may share a physical folder.
+
+    Quarantine files outside the served uploads directory so failed commits can
+    restore them and accidental deletes remain manually recoverable.
+    """
+    paths = []
+    for asset in assets:
+        if asset.stored_path:
+            source = Path(asset.stored_path)
+            try:
+                source.resolve().relative_to(UPLOAD_ROOT.resolve())
+            except ValueError as exc:
+                raise HTTPException(400, "Stored file is outside the library.") from exc
+            if any(
+                other not in assets
+                and other.stored_path
+                and Path(other.stored_path).resolve() == source.resolve()
+                for other in ASSETS
+            ):
+                continue
+            if source.exists() and source not in paths:
+                paths.append(source)
+    if not paths:
+        return
+    trash = UPLOAD_ROOT.parent / "trash" / uuid4().hex
+    trash.mkdir(parents=True)
+    manifest = []
+    for index, source in enumerate(paths):
+        destination = trash / f"{index}-{source.name}"
+        source.replace(destination)
+        FILE_MOVES.append((source, destination))
+        manifest.append({"original": str(source), "trashed": destination.name})
+    recovery = {
+        "files": manifest,
+        "assets": [asset.model_dump() for asset in assets],
+        "task_statuses": dict(TASK_STATUSES),
+    }
+    (trash / "manifest.json").write_text(json.dumps(recovery), encoding="utf-8")
+
+
+def _reconcile_missing_files(assets: list[ProjectAsset], root: Path = UPLOAD_ROOT) -> int:
+    """Relink assets whose file was moved by an interrupted mutation.
+
+    A process killed between file moves and the index save leaves the index
+    pointing at old paths while the bytes live in the renamed project folder
+    (the trash for deletions is outside ``root`` and never reconciled). Relink
+    only when exactly one unreferenced file with the same name exists under
+    ``root``, so a file owned by another asset is never adopted and ambiguous
+    names stay missing for manual recovery instead of guessing. The asset keeps
+    its original project grouping; the next move/rename tidies the folder.
+    """
+    missing = [
+        asset for asset in assets if asset.stored_path and not Path(asset.stored_path).exists()
+    ]
+    if not missing:
+        return 0
+    referenced = {Path(asset.stored_path).resolve() for asset in assets if asset.stored_path}
+    orphans_by_name: dict[str, list[Path]] = defaultdict(list)
+    for path in root.rglob("*"):
+        if path.is_file() and path.resolve() not in referenced:
+            orphans_by_name[path.name].append(path)
+    relinked = 0
+    adopted: set[Path] = set()
+    for asset in missing:
+        candidates = [
+            candidate
+            for candidate in orphans_by_name.get(Path(asset.stored_path).name, [])
+            if candidate not in adopted
+        ]
+        if len(candidates) == 1:
+            logger.warning(
+                "Relinking missing file '%s' to recovered location %s",
+                asset.file_name,
+                candidates[0],
+            )
+            asset.stored_path = str(candidates[0])
+            adopted.add(candidates[0])
+            relinked += 1
+        else:
+            logger.warning("Keeping metadata for unavailable file: %s", asset.file_name)
+    return relinked
+
+
+def _clean_stale_staging(max_age_seconds: float = STAGING_MAX_AGE_SECONDS) -> None:
+    """Remove staging directories orphaned by dead uploads.
+
+    Age-gated so a concurrently running API process mid-upload (the app is
+    single-process by design, but a second instance may be pointed at the same
+    data) is never disrupted; anything recent is left alone.
+    """
+    if not STAGING_ROOT.exists():
+        return
+    cutoff = time.time() - max_age_seconds
+    for directory in STAGING_ROOT.iterdir():
+        try:
+            if directory.is_dir() and directory.stat().st_mtime < cutoff:
+                shutil.rmtree(directory)
+        except OSError:
+            logger.warning("Could not remove stale staging directory: %s", directory)
 
 
 def _load_library_index() -> None:
     """Restore the analyzed library from disk so uploads survive API restarts."""
     if not LIBRARY_INDEX_PATH.exists():
         return
+    raw_bytes = LIBRARY_INDEX_PATH.read_bytes()
     try:
-        raw = json.loads(LIBRARY_INDEX_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
+        raw = json.loads(raw_bytes)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "Cannot read library-index.json. Restore library-index.json.bak before restarting."
+        ) from exc
+    mark_known_good(LIBRARY_INDEX_PATH, raw_bytes)
     for item in raw.get("assets", []):
         try:
             asset = ProjectAsset.model_validate(item)
         except ValidationError:
-            continue
-        if asset.stored_path and not Path(asset.stored_path).exists():
             continue
         ASSETS.append(asset)
     statuses = raw.get("task_statuses", {})
@@ -79,18 +311,27 @@ def _load_library_index() -> None:
     prefs = raw.get("preferences", [])
     if isinstance(prefs, list):
         PREFERENCES.extend(str(pref) for pref in prefs)
+    _reconcile_missing_files(ASSETS)
+    summarize_projects(ASSETS, TASK_STATUSES)  # Migrate legacy task IDs before names change.
     RETRIEVER.add_assets(ASSETS)
 
 
 def _save_library_index() -> None:
     payload = {
-        "assets": [asset.model_dump() for asset in ASSETS],
+        "assets": [_storable_asset(asset) for asset in ASSETS],
         "task_statuses": TASK_STATUSES,
         "project_order": PROJECT_ORDER,
         "preferences": PREFERENCES,
     }
-    LIBRARY_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    LIBRARY_INDEX_PATH.write_text(json.dumps(payload), encoding="utf-8")
+    save_index(LIBRARY_INDEX_PATH, payload)
+
+
+def _storable_asset(asset: ProjectAsset) -> dict:
+    payload = asset.model_dump()
+    midi = payload.get("midi")
+    if midi and len(midi.get("notes", [])) > MAX_STORED_NOTES:
+        midi["notes"] = midi["notes"][:MAX_STORED_NOTES]
+    return payload
 
 
 def _ordered_project_names() -> list[str]:
@@ -102,6 +343,7 @@ def _ordered_project_names() -> list[str]:
 
 
 _load_library_index()
+_clean_stale_staging()
 
 
 class ChatRequest(BaseModel):
@@ -171,22 +413,23 @@ def _ai_hints(status: dict[str, str]) -> list[str]:
     if not RETRIEVER.vector_enabled:
         hints.append(
             "Semantic search is off. Install the vector extra "
-            "(pip install -e \".[vector]\") to enable local ChromaDB embeddings."
+            '(pip install -e ".[vector]") to enable local ChromaDB embeddings.'
         )
     return hints
 
 
 @app.get("/api/memory")
+@synchronized
 def get_memory() -> dict:
     """The producer's creative fingerprint: derived from the library + stated prefs."""
     return producer_profile(ASSETS, PREFERENCES)
 
 
 @app.put("/api/memory")
+@mutation
 def update_memory(payload: MemoryUpdate) -> dict:
     cleaned = [pref.strip() for pref in payload.preferences if pref.strip()]
     PREFERENCES[:] = cleaned
-    _save_library_index()
     return producer_profile(ASSETS, PREFERENCES)
 
 
@@ -210,31 +453,77 @@ def pipeline() -> dict:
     }[status["mode"]]
 
     stages = [
-        {"id": "upload", "title": "Upload", "tech": "FastAPI", "state": "active",
-         "detail": f"{len(ASSETS)} files stored under .sessioniq-data"},
-        {"id": "audio", "title": "Audio Analysis", "tech": "librosa", "state": "active",
-         "detail": f"BPM, key, dB, brightness, beats · {audio_count} audio files"},
-        {"id": "midi", "title": "MIDI Analysis", "tech": "pretty_midi", "state": "active",
-         "detail": f"Notes, pitch range, tempo · {midi_count} MIDI files"},
-        {"id": "notes", "title": "Metadata & Task Extraction", "tech": "SessionIQ",
-         "state": "active",
-         "detail": f"Action items, tags, statuses · {note_count} notes"},
-        {"id": "embeddings", "title": "Embeddings", "tech": "ChromaDB (all-MiniLM-L6-v2)",
-         "state": "active" if vector_on else "fallback",
-         "detail": "Local semantic vectors" if vector_on else "Disabled - lexical only"},
-        {"id": "vectordb", "title": "Vector Database", "tech": "ChromaDB",
-         "state": "active" if vector_on else "fallback",
-         "detail": "Persisted vector index" if vector_on else "Not in use"},
-        {"id": "retriever", "title": "Hybrid Retriever", "tech": "TF-IDF + vectors",
-         "state": "active",
-         "detail": "Synonym-expanded lexical scoring"
-         + (" blended with vectors" if vector_on else "")},
-        {"id": "llm", "title": "Answer Generation", "tech": engine_label, "state": "active",
-         "detail": f"Prompt {PROMPT_VERSION} · grounded, cited"},
-        {"id": "validation", "title": "Validation", "tech": "Grounding checks", "state": "active",
-         "detail": "Citations, source mapping, hallucination guard"},
-        {"id": "answer", "title": "Answer + Quality Report", "tech": "SessionIQ", "state": "active",
-         "detail": "Confidence, provenance, latency, tokens"},
+        {
+            "id": "upload",
+            "title": "Upload",
+            "tech": "FastAPI",
+            "state": "active",
+            "detail": f"{len(ASSETS)} files stored under .sessioniq-data",
+        },
+        {
+            "id": "audio",
+            "title": "Audio Analysis",
+            "tech": "librosa",
+            "state": "active",
+            "detail": f"BPM, key, dB, brightness, beats · {audio_count} audio files",
+        },
+        {
+            "id": "midi",
+            "title": "MIDI Analysis",
+            "tech": "pretty_midi",
+            "state": "active",
+            "detail": f"Notes, pitch range, tempo · {midi_count} MIDI files",
+        },
+        {
+            "id": "notes",
+            "title": "Metadata & Task Extraction",
+            "tech": "SessionIQ",
+            "state": "active",
+            "detail": f"Action items, tags, statuses · {note_count} notes",
+        },
+        {
+            "id": "embeddings",
+            "title": "Embeddings",
+            "tech": "ChromaDB (all-MiniLM-L6-v2)",
+            "state": "active" if vector_on else "fallback",
+            "detail": "Local semantic vectors" if vector_on else "Disabled - lexical only",
+        },
+        {
+            "id": "vectordb",
+            "title": "Vector Database",
+            "tech": "ChromaDB",
+            "state": "active" if vector_on else "fallback",
+            "detail": "Persisted vector index" if vector_on else "Not in use",
+        },
+        {
+            "id": "retriever",
+            "title": "Hybrid Retriever",
+            "tech": "TF-IDF + vectors",
+            "state": "active",
+            "detail": "Synonym-expanded lexical scoring"
+            + (" blended with vectors" if vector_on else ""),
+        },
+        {
+            "id": "llm",
+            "title": "Answer Generation",
+            "tech": engine_label,
+            "state": "active",
+            "detail": f"Prompt {PROMPT_VERSION} · grounded, cited",
+        },
+        {
+            "id": "validation",
+            "title": "Validation",
+            "tech": "Grounding checks",
+            "state": "active",
+            "detail": "Citations, source mapping, hallucination guard",
+        },
+        {
+            "id": "answer",
+            "title": "Answer + Quality Report",
+            "tech": "SessionIQ",
+            "state": "active",
+            "detail": "Confidence, provenance, latency, tokens",
+        },
     ]
     return {
         "engine": status,
@@ -245,18 +534,28 @@ def pipeline() -> dict:
 
 
 @app.get("/api/library")
+@synchronized
 def library() -> dict:
     collections = smart_collections(ASSETS)
     order = _ordered_project_names()
+    # One pass for every project's cover artwork instead of rescanning all
+    # assets per project summary.
+    artwork_by_project: dict[str, str | None] = {}
+    for asset in ASSETS:
+        if asset.kind == AssetKind.IMAGE and asset.project_name not in artwork_by_project:
+            artwork_by_project[asset.project_name] = _media_url(asset)
     summaries = summarize_projects(ASSETS, TASK_STATUSES)
     summaries.sort(
-        key=lambda summary: order.index(summary.project_name)
-        if summary.project_name in order
-        else len(order)
+        key=lambda summary: (
+            order.index(summary.project_name) if summary.project_name in order else len(order)
+        )
     )
     return {
         "assets": [_asset_payload(asset) for asset in ASSETS],
-        "projects": [_project_payload(summary) for summary in summaries],
+        "projects": [
+            _project_payload(summary, artwork_by_project.get(summary.project_name))
+            for summary in summaries
+        ],
         "smartCollections": {
             name: [asset.id for asset in collection_assets]
             for name, collection_assets in collections.items()
@@ -264,17 +563,9 @@ def library() -> dict:
     }
 
 
-def _project_payload(summary) -> dict:
+def _project_payload(summary, artwork: str | None = None) -> dict:
     """Project summary plus its cover artwork (first image asset), for folder cards."""
     payload = summary.model_dump()
-    artwork = next(
-        (
-            _media_url(asset)
-            for asset in ASSETS
-            if asset.project_name == summary.project_name and asset.kind == AssetKind.IMAGE
-        ),
-        None,
-    )
     payload["artwork"] = artwork
     return payload
 
@@ -288,29 +579,63 @@ async def upload(
 ) -> dict:
     created: list[ProjectAsset] = []
     client_tags = _client_metadata_by_name(client_metadata)
-    for upload_file in files:
-        saved_path = safe_upload_path(project_name, upload_file.filename or "upload")
-        saved_path.write_bytes(await upload_file.read())
-        try:
-            asset = ingest_file(
-                saved_path,
-                note=note,
-                project_name=project_name,
-                stored_path=str(saved_path),
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"{upload_file.filename}: {exc}") from exc
-        _apply_client_metadata(asset, client_tags.get(upload_file.filename or ""))
-        created.append(asset)
+    staging = UPLOAD_ROOT.parent / "staging" / uuid4().hex
+    staging.mkdir(parents=True)
+    try:
+        for upload_file in files:
+            filename = (upload_file.filename or "upload").replace("\\", "/")
+            if Path(filename).suffix.lower() not in supported_extensions():
+                raise HTTPException(400, f"Unsupported file type: {filename}")
+            saved_path = safe_upload_path(project_name, filename, root=staging)
+            size = 0
+            with saved_path.open("wb") as destination:
+                while chunk := await upload_file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > 512 * 1024 * 1024:
+                        raise HTTPException(413, "Each file must be 512 MB or smaller.")
+                    destination.write(chunk)
+            try:
+                asset = await run_in_threadpool(
+                    ingest_file,
+                    saved_path,
+                    note=note,
+                    project_name=project_name,
+                    stored_path=str(saved_path),
+                )
+            except Exception as exc:
+                raise HTTPException(400, f"{filename}: {exc}") from exc
+            _apply_client_metadata(asset, client_tags.get(upload_file.filename or ""))
+            created.append(asset)
+        return await run_in_threadpool(_commit_upload, created)
+    finally:
+        # This directory is generated for this request, never a user project.
+        for path in sorted(staging.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            if path.is_file():
+                path.unlink(missing_ok=True)
+            elif path.is_dir():
+                path.rmdir()
+        staging.rmdir()
+
+
+@mutation
+def _commit_upload(created: list[ProjectAsset]) -> dict:
+    for asset in created:
+        original = Path(asset.stored_path)
+        target = safe_upload_path(asset.project_name, asset.file_name)
+        original.replace(target)
+        FILE_MOVES.append((original, target))
+        asset.stored_path = str(target)
+        asset.file_name = target.name
         ASSETS.append(asset)
     RETRIEVER.add_assets(created)
-    _save_library_index()
     return {"assets": [_asset_payload(asset) for asset in created], "library": library()}
 
 
 @app.patch("/api/assets/{asset_id}")
+@mutation
 def update_asset(asset_id: str, update: AssetUpdate) -> dict:
     asset = _asset_by_id(asset_id)
+    summarize_projects(ASSETS, TASK_STATUSES)
     if update.status is not None:
         asset.status = update.status
     if update.tags is not None:
@@ -320,27 +645,25 @@ def update_asset(asset_id: str, update: AssetUpdate) -> dict:
     if update.project_name is not None:
         target = update.project_name.strip() or "Unassigned"
         if target != asset.project_name:
-            asset.stored_path = move_stored_file(asset.stored_path, target)
-            asset.project_name = target
+            _move_asset(asset, target)
     RETRIEVER.refresh_asset(asset)
-    _save_library_index()
     return {"asset": _asset_payload(asset), "library": library()}
 
 
 @app.delete("/api/assets/{asset_id}")
+@mutation
 def delete_asset(asset_id: str) -> dict:
     asset = _asset_by_id(asset_id)
-    if asset.stored_path:
-        with contextlib.suppress(OSError):
-            Path(asset.stored_path).unlink(missing_ok=True)
+    _trash_assets([asset])
     ASSETS.remove(asset)
     RETRIEVER.remove_asset(asset_id)
-    _save_library_index()
     return {"deleted": asset_id, "library": library()}
 
 
 @app.post("/api/projects/rename")
+@mutation
 def rename_project(payload: ProjectRename) -> dict:
+    summarize_projects(ASSETS, TASK_STATUSES)
     old = payload.old_name.strip("/")
     new_name = payload.new_name.strip().strip("/") or "Unassigned"
     prefix = old + "/"
@@ -353,19 +676,18 @@ def rename_project(payload: ProjectRename) -> dict:
     if not matched:
         raise HTTPException(status_code=404, detail=f"Project '{payload.old_name}' was not found.")
     for asset in matched:
-        target = new_name + asset.project_name[len(old):]
-        asset.stored_path = move_stored_file(asset.stored_path, target)
-        asset.project_name = target
+        target = new_name + asset.project_name[len(old) :]
+        _move_asset(asset, target)
         RETRIEVER.refresh_asset(asset)
     PROJECT_ORDER[:] = [
-        new_name + name[len(old):] if name == old or name.startswith(prefix) else name
+        new_name + name[len(old) :] if name == old or name.startswith(prefix) else name
         for name in PROJECT_ORDER
     ]
-    _save_library_index()
     return {"library": library()}
 
 
 @app.post("/api/projects/delete")
+@mutation
 def delete_project(payload: ProjectDelete) -> dict:
     """Delete a project/album and everything under it (all songs + files)."""
     prefix = payload.name.strip().strip("/")
@@ -377,28 +699,26 @@ def delete_project(payload: ProjectDelete) -> dict:
     ]
     if not matched:
         raise HTTPException(status_code=404, detail=f"Project '{payload.name}' was not found.")
+    _trash_assets(matched)
     for asset in matched:
         ASSETS.remove(asset)
         RETRIEVER.remove_asset(asset.id)
-    # Remove the whole folder tree on disk (album dir removes its song dirs too).
-    with contextlib.suppress(OSError):
-        shutil.rmtree(UPLOAD_ROOT / project_slug(prefix), ignore_errors=True)
     PROJECT_ORDER[:] = [
         name for name in PROJECT_ORDER if not (name == prefix or name.startswith(prefix_slash))
     ]
-    _save_library_index()
     return {"deleted": prefix, "library": library()}
 
 
 @app.post("/api/projects/reorder")
+@mutation
 def reorder_projects(payload: ProjectOrder) -> dict:
     present = {asset.project_name for asset in ASSETS}
     PROJECT_ORDER[:] = [name for name in payload.order if name in present]
-    _save_library_index()
     return {"library": library()}
 
 
 @app.patch("/api/tasks/{task_id}")
+@mutation
 def update_task(task_id: str, update: TaskUpdate) -> dict:
     known_ids = {
         task.id for summary in summarize_projects(ASSETS, TASK_STATUSES) for task in summary.tasks
@@ -406,7 +726,6 @@ def update_task(task_id: str, update: TaskUpdate) -> dict:
     if task_id not in known_ids:
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' was not found.")
     TASK_STATUSES[task_id] = update.status.value
-    _save_library_index()
     return {"library": library()}
 
 
@@ -414,10 +733,17 @@ def update_task(task_id: str, update: TaskUpdate) -> dict:
 def chat(request: ChatRequest) -> dict:
     global LAST_ANSWER, LAST_ANSWER_SOURCES
     started = time.perf_counter()
-    sources = RETRIEVER.search(request.question, project_name=request.project_name or None)
+    with STATE_LOCK:
+        sources = copy.deepcopy(
+            RETRIEVER.search(request.question, project_name=request.project_name or None)
+        )
+        preferences = list(PREFERENCES)
+        tasks = [
+            task for project in summarize_projects(ASSETS, TASK_STATUSES) for task in project.tasks
+        ]
     retrieved_ms = (time.perf_counter() - started) * 1000
 
-    assistant = GroundedAssistant()
+    assistant = GroundedAssistant(preferences=preferences, tasks=tasks)
     answer = assistant.answer(request.question, sources)
     elapsed_ms = (time.perf_counter() - started) * 1000
 
@@ -448,15 +774,17 @@ def _quality_report(
     grounded = bool(answer.citations) and not errors
     checks = [
         {"label": "Sources found", "ok": bool(sources)},
-        {"label": "Answer grounded in sources", "ok": grounded},
+        {"label": "Automated citation checks passed", "ok": grounded},
         {"label": "Citations present", "ok": bool(answer.citations)},
         {"label": "Citations map to retrieved files", "ok": not errors},
-        {"label": "Metadata-derived claims", "ok": True},
     ]
     return {
         "confidence": answer.confidence,
         "grounded": grounded,
-        "hallucination_risk": "low" if grounded else "elevated",
+        "hallucination_risk": "not assessed" if grounded else "elevated",
+        "limitation": (
+            "Citation and numeric checks do not verify every claim or measure hallucination risk."
+        ),
         "sources_retrieved": len(sources),
         "files_cited": len(cited_files),
         "checks": checks,
@@ -480,6 +808,7 @@ class SearchRequest(BaseModel):
 
 
 @app.post("/api/search")
+@synchronized
 def semantic_search(request: SearchRequest) -> dict:
     """Meaning-based file search: the hybrid retriever ranks by content, not filename."""
     results = RETRIEVER.search(
@@ -529,12 +858,9 @@ def validation() -> dict:
                 "detail": "; ".join(errors) if errors else "Answer cites retrieved sources.",
             },
             {
-                "name": "Metadata grounding",
-                "status": "pass",
-                "detail": (
-                    "BPM, duration, note counts, and task claims are drawn from "
-                    "extracted metadata."
-                ),
+                "name": "Claim verification",
+                "status": "pending",
+                "detail": "Automated checks cannot verify every claim. Review the cited sources.",
             },
         ]
     }
@@ -578,6 +904,7 @@ def _asset_payload(asset: ProjectAsset) -> dict:
     payload = asset.compact_metadata()
     payload["media_url"] = _media_url(asset)
     payload["display_type"] = _display_type(asset)
+    payload["file_missing"] = bool(asset.stored_path and not Path(asset.stored_path).exists())
     payload["bpm"] = _asset_bpm(asset)
     payload["key"] = _asset_key(asset)
     payload["duration"] = (

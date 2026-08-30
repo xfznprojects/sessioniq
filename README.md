@@ -12,7 +12,7 @@ and answers questions about your work **with citations to the exact files it use
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-38BDF8?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
-[![Tests](https://img.shields.io/badge/tests-61_passing-2ea44f)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-81_passing-2ea44f)](#-testing)
 [![Ruff](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)](https://docs.astral.sh/ruff/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -79,9 +79,9 @@ SessionIQ is **not** a DAW plugin and it does not generate music. It's a smart p
 **LLM-ops-grade AI workflow**: ingestion → analysis → embeddings → vector retrieval → a grounded
 assistant → validation → explainability — wrapped in a polished, keyboard-friendly dashboard.
 
-Every answer the assistant gives is **grounded in your files** and shipped with a **Quality Report**
-(confidence, hallucination risk, sources retrieved, model, prompt version, latency, token usage), so
-it reads like a real production AI system, not a chat box wired to an LLM.
+Answers cite project files and include a **Quality Report** with citation checks, numeric checks,
+model provenance, latency, and token usage. These checks do not verify every claim or measure
+hallucination risk; review the cited evidence for important decisions.
 
 It runs **fully offline** out of the box — a deterministic metadata engine answers when no model is
 configured, and semantic search degrades gracefully to lexical when embeddings aren't installed.
@@ -94,7 +94,7 @@ configured, and semantic search degrades gracefully to lexical when embeddings a
 | 🎚️ **Real analysis** | librosa (BPM, key, peak/RMS dB, brightness, beats) · pretty_midi (notes, pitch range, tempo) · note/task extraction. |
 | 🤖 **Grounded assistant** | Answers cite the files used. Runs a **local Ollama model**, **OpenAI**, or a deterministic offline engine — automatically. |
 | 🔎 **Semantic search & similarity** | Find files by meaning ("tracks that still need mastering") and compare tracks — *"Afterglow is 66% similar to Midnight Drive"* — with a per-dimension breakdown. |
-| 📊 **Quality Report** | Per-answer confidence, grounding, hallucination risk, provenance (model / prompt version / temperature / latency / tokens) and a 5-point grounding checklist. |
+| 📊 **Quality Report** | Per-answer confidence, grounding, hallucination risk, provenance (model / prompt version / temperature / latency / tokens) and automated citation/numeric checks with explicit limitations. |
 | 🩺 **Project Health** | Completeness score + checklist (audio, notes, reference, master, tasks) + actionable suggestions. |
 | 🧠 **AI Memory** | A producer "creative fingerprint" derived from your library plus editable preferences the assistant remembers across sessions. |
 | 🏷️ **Custom tags** | Manual, color-coded tag pills alongside AI-suggested ones. |
@@ -118,7 +118,8 @@ configured, and semantic search degrades gracefully to lexical when embeddings a
 - **Studio** — AI memory, session timeline
 - **Pipeline** — architecture diagram + plugin registry
 
-The **Ask + Quality Report + Tasks** rail stays docked on the right across every view.
+The right rail has **Assistant / Tasks** tabs, with answer checks under an expandable section.
+A persistent bottom player continues across views and remembers the last track and playback position.
 
 </td>
 </tr>
@@ -150,12 +151,12 @@ flowchart LR
 ## 🧰 Tech stack
 
 **Backend** — Python 3.11+, FastAPI, Uvicorn, Pydantic, librosa, numpy, soundfile, pretty_midi/mido, ChromaDB (optional), OpenAI SDK (OpenAI **or** Ollama).
-**Frontend** — React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Table, Recharts, wavesurfer.js, Framer Motion, Lucide, music-metadata.
+**Frontend** — React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Table, Recharts, HTML audio, Framer Motion, Lucide, music-metadata.
 **Quality** — Pytest, Ruff, `tsc` + Vite build.
 
 ## 🚀 Quick start
 
-**Prerequisites:** Python 3.11+ and Node 18+.
+**Prerequisites:** Python 3.11+ and Node 22.18+ (Node 24 recommended).
 
 > Paths below use Windows/PowerShell. On macOS/Linux use `.venv/bin/python` instead of `.venv\Scripts\python.exe`.
 
@@ -228,10 +229,54 @@ sessioniq/
 ## 🧪 Testing
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest        # 61 passing
+.\.venv\Scripts\python.exe -m pytest        # 81 passing
 .\.venv\Scripts\python.exe -m ruff check .
-cd web; npm run build                       # tsc + vite build
+cd web; npm test                            # frontend scope regressions
+npm run build                               # tsc + vite build
 ```
+
+## Workspace and safety update
+
+- Smart Collections now filter the file list; project cards open the selected workspace.
+- Files appear near the top, with compact project navigation and expandable readiness/analysis.
+- The bottom player supports play/pause, seeking, volume, previous/next track, and local resume.
+  Space toggles playback outside input controls; Alt+Left/Right switches tracks.
+- Note drafts are retained in this browser. Save notes (or Ctrl/Cmd+Enter) to update the library,
+  tasks, and assistant context. Drafts and player resume data are local to the browser origin.
+- Completed tasks keep their status after renaming/moving projects. Existing task IDs are migrated
+  in memory on load and persisted on the next successful save. Artwork does not count as reference audio.
+- Saved preferences and current task statuses are supplied to the optional LLM. The offline rules
+  engine uses saved task statuses, but does not personalize its wording from preferences.
+- Imports are staged as a batch and committed only after every file succeeds. Audio analysis runs
+  in a worker thread; each file is limited to 512 MB. A durable job queue with per-file progress,
+  cancellation, and retry is not yet implemented.
+
+### Library persistence and recovery
+
+Run one API process per library. Writes are serialized within that process. The index is replaced
+atomically and its previous version retained as `library-index.json.bak` in the data directory.
+Do not run multiple API workers against the same library; this is not a multi-process database.
+
+New upload folders include a hash of the exact project name to prevent slug/case collisions.
+Existing file paths remain valid. Deletes only remove files owned by the selected assets and move
+those files outside the served upload tree into `trash/<id>/`, alongside `manifest.json` containing
+original paths, asset metadata, and task statuses. These recovery copies are retained indefinitely;
+there is no trash-management UI yet, so disk space is not reclaimed automatically.
+
+For recovery, stop the API, preserve the current data directory, and use the manifest to restore
+files and metadata. A damaged index can be replaced with its `.bak` copy. The backup is one save
+behind and must be reconciled with any files moved since that save; it is not a complete filesystem
+snapshot. Ordinary failed mutations roll back in-process.
+
+On startup the API attempts light recovery: assets whose file is missing are relinked when exactly
+one unreferenced file with the same name exists under the uploads directory (typical for a process
+killed between file moves and the index save). Ambiguous or absent files keep their metadata, are
+flagged `file_missing` in the API and shown with a "File missing" badge in the UI, and may still
+require manual recovery. Stale upload staging directories older than 24 hours are removed at
+startup. These are heuristics, not a crash-atomic database: a crash mid-move can still split a
+project across old and new names until you tidy it manually.
+
+Version comparison and timestamp-linked notes remain follow-up work.
 
 ## 📄 License
 
