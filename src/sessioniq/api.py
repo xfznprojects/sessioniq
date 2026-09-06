@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import logging
@@ -25,6 +26,8 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
+from sessioniq import jobs
+from sessioniq.advisor import rank_next, reference_comparison, weekly_digest
 from sessioniq.assistant import PROMPT_VERSION, GroundedAssistant, llm_status
 from sessioniq.conversation import (
     condense_with_llm,
@@ -420,9 +423,10 @@ def _log_query(request: ChatRequest, answer, quality: dict, payload: dict) -> st
         "retrieval_ms": quality.get("retrieval_ms"),
         "feedback": None,
     }
-    QUERY_LOG.append(entry)
-    del QUERY_LOG[:-QUERY_LOG_MAX]
-    _save_query_log()
+    with STATE_LOCK:
+        QUERY_LOG.append(entry)
+        del QUERY_LOG[:-QUERY_LOG_MAX]
+        _save_query_log()
     return entry["id"]
 
 
@@ -641,7 +645,23 @@ def project_report(project: str = "All Projects") -> Response:
 
 @app.post("/api/assets/{asset_id}/transcribe")
 async def transcribe_asset(asset_id: str) -> dict:
-    """Transcribe an audio voice memo into a note asset using local Whisper."""
+    """Transcribe an audio voice memo into a note asset using local Whisper.
+
+    Synchronous for short memos; for anything long, start a job via
+    /api/jobs/transcribe instead so the request does not wait minutes.
+    """
+    asset = _transcribable_asset(asset_id)
+    status = transcription_status()
+    if not status.get("available"):
+        hint = status.get("hint", "Transcription is unavailable.")
+        raise HTTPException(status_code=409, detail=hint)
+    text = await run_in_threadpool(transcribe_audio, asset.stored_path)
+    if not text:
+        raise HTTPException(status_code=422, detail="No speech was detected in this file.")
+    return await run_in_threadpool(_commit_transcript, asset, text)
+
+
+def _transcribable_asset(asset_id: str) -> ProjectAsset:
     with STATE_LOCK:
         asset = _asset_by_id(asset_id)
         if not asset.audio or not asset.stored_path or not Path(asset.stored_path).exists():
@@ -651,14 +671,7 @@ async def transcribe_asset(asset_id: str) -> dict:
             )
         if Path(asset.file_name).suffix.lower() not in _TRANSCRIBABLE_SUFFIXES:
             raise HTTPException(status_code=400, detail="This file type cannot be transcribed.")
-    status = transcription_status()
-    if not status.get("available"):
-        hint = status.get("hint", "Transcription is unavailable.")
-        raise HTTPException(status_code=409, detail=hint)
-    text = await run_in_threadpool(transcribe_audio, asset.stored_path)
-    if not text:
-        raise HTTPException(status_code=422, detail="No speech was detected in this file.")
-    return await run_in_threadpool(_commit_transcript, asset, text)
+        return asset
 
 
 @mutation
@@ -997,43 +1010,52 @@ def _prepare_chat(request: ChatRequest) -> dict:
     history = [turn.model_dump() for turn in request.history[-MAX_CHAT_HISTORY:]]
     llm_on = bool(os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL"))
     standalone, rewrite_method = request.question, None
-    if llm_on and looks_like_followup(request.question, bool(history)):
-        try:
-            standalone = condense_with_llm(
-                request.question,
-                history,
-                os.getenv("SESSIONIQ_MODEL", "gpt-4.1-mini"),
-            )
-            rewrite_method = "llm"
-        except Exception:
-            logger.warning("LLM condensation failed; trying the offline heuristic.", exc_info=True)
+    assets_snapshot: list[ProjectAsset] | None = None
+
+    # The offline heuristic is free and resolves most follow-ups (they quote a
+    # file the previous answer mentioned); the LLM condense round trip only
+    # runs when it cannot — one fewer model call on the common path.
+    if looks_like_followup(request.question, bool(history)):
+        with STATE_LOCK:
+            assets_snapshot = list(ASSETS)
+        heuristic = deterministic_standalone(request.question, history, assets_snapshot)
+        if heuristic != request.question:
+            standalone, rewrite_method = heuristic, "heuristic"
+        elif llm_on:
+            try:
+                standalone = condense_with_llm(
+                    request.question,
+                    history,
+                    os.getenv("SESSIONIQ_MODEL", "gpt-4.1-mini"),
+                )
+                rewrite_method = "llm"
+            except Exception:
+                logger.warning("LLM condensation failed.", exc_info=True)
 
     with STATE_LOCK:
-        assets_snapshot = list(ASSETS)
-        if rewrite_method is None and looks_like_followup(request.question, bool(history)):
-            heuristic = deterministic_standalone(request.question, history, assets_snapshot)
-            if heuristic != request.question:
-                standalone, rewrite_method = heuristic, "heuristic"
+        if assets_snapshot is None:
+            assets_snapshot = list(ASSETS)
         sources = copy.deepcopy(
             RETRIEVER.search(standalone, project_name=request.project_name or None)
         )
         preferences = list(PREFERENCES)
         decisions = list(DECISIONS)
-        tasks = [
-            task for project in summarize_projects(ASSETS, TASK_STATUSES) for task in project.tasks
-        ]
+        summaries = summarize_projects(ASSETS, TASK_STATUSES)
+        tasks = [task for project in summaries for task in project.tasks]
 
     toolbox = LibraryToolbox(
         assets_snapshot,
         tasks=tasks,
         search=RETRIEVER.search,
         default_project=request.project_name or None,
+        summaries=summaries,
     )
     assistant = GroundedAssistant(
         preferences=preferences,
         tasks=tasks,
         toolbox=toolbox,
         decisions=decisions,
+        summaries=summaries,
     )
     return {
         "history": history,
@@ -1044,6 +1066,7 @@ def _prepare_chat(request: ChatRequest) -> dict:
         "toolbox": toolbox,
         "assistant": assistant,
         "retrieved_ms": time.perf_counter(),
+        "_summaries": summaries,
     }
 
 
@@ -1186,6 +1209,7 @@ class FeedbackUpdate(BaseModel):
 
 
 @app.post("/api/queries/{query_id}/feedback")
+@synchronized
 def update_query_feedback(query_id: str, update: FeedbackUpdate) -> dict:
     entry = next((item for item in QUERY_LOG if item.get("id") == query_id), None)
     if entry is None:
@@ -1308,6 +1332,222 @@ def similar(asset_id: str) -> dict:
             match | {"asset": _asset_payload(_asset_by_id(match["id"]))} for match in matches
         ],
     }
+
+
+@app.get("/api/reference")
+@synchronized
+def reference_comparison_endpoint(project: str) -> dict:
+    """Mix-vs-reference deltas for one project (needs a Reference-status audio file)."""
+    scope = project.strip()
+    if scope == "All Projects":
+        raise HTTPException(400, "Pick a specific project to compare against its reference.")
+    comparison = reference_comparison(ASSETS, scope)
+    if comparison is None:
+        return {"reference": None, "comparisons": []}
+    return comparison
+
+
+@app.get("/api/next-up")
+@synchronized
+def next_up() -> dict:
+    """Projects ranked by how finishable they are right now."""
+    summaries = summarize_projects(ASSETS, TASK_STATUSES)
+    return {"ranking": rank_next(list(ASSETS), summaries)}
+
+
+@app.get("/api/digest")
+@synchronized
+def digest() -> dict:
+    """A one-glance state of the catalog: stalled work, wins, and gaps."""
+    summaries = summarize_projects(ASSETS, TASK_STATUSES)
+    return weekly_digest(list(ASSETS), summaries)
+
+
+class LibraryScan(BaseModel):
+    path: str
+    project_name: str | None = None
+    note: str = ""
+
+
+MAX_SCAN_FILES = 500
+MAX_FILE_BYTES = 512 * 1024 * 1024
+
+
+@app.post("/api/library/scan")
+async def scan_folder(payload: LibraryScan) -> dict:
+    """Import every supported file under a folder (recursively, copied not moved).
+
+    The folder stays untouched on disk; files land in the library exactly like
+    uploads. Bounded by file count and per-file size so one wrong path cannot
+    swallow a drive."""
+    root = Path(payload.path).expanduser()
+    if not root.is_dir():
+        raise HTTPException(400, f"'{payload.path}' is not a folder.")
+    files = sorted(
+        candidate
+        for candidate in root.rglob("*")
+        if candidate.is_file() and candidate.suffix.lower() in supported_extensions()
+    )
+    if not files:
+        raise HTTPException(400, "No supported audio, MIDI, note, or image files in that folder.")
+    if len(files) > MAX_SCAN_FILES:
+        raise HTTPException(
+            400,
+            f"{len(files)} supported files exceeds the {MAX_SCAN_FILES}-file scan limit; "
+            "import in smaller folders.",
+        )
+    project = (payload.project_name or "").strip() or root.name
+    staging = UPLOAD_ROOT.parent / "staging" / uuid4().hex
+    staging.mkdir(parents=True)
+    created: list[ProjectAsset] = []
+    try:
+        for source in files:
+            if source.stat().st_size > MAX_FILE_BYTES:
+                raise HTTPException(413, f"{source.name} is over the 512 MB per-file limit.")
+            saved = safe_upload_path(project, source.name, root=staging)
+            shutil.copy2(source, saved)
+            asset = await run_in_threadpool(
+                ingest_file,
+                saved,
+                note=payload.note,
+                project_name=project,
+                stored_path=str(saved),
+            )
+            created.append(asset)
+        return await run_in_threadpool(_commit_upload, created)
+    finally:
+        for path in sorted(staging.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            if path.is_file():
+                path.unlink(missing_ok=True)
+            elif path.is_dir():
+                path.rmdir()
+        with contextlib.suppress(OSError):
+            staging.rmdir()
+
+
+@app.get("/api/jobs")
+def list_jobs() -> dict:
+    return {"jobs": jobs.list_jobs()}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str) -> dict:
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' was not found.")
+    return job
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict:
+    if not jobs.request_cancel(job_id):
+        raise HTTPException(status_code=409, detail="Job is not running.")
+    return {"job_id": job_id, "cancel_requested": True}
+
+
+class TranscribeJobRequest(BaseModel):
+    asset_id: str
+
+
+@app.post("/api/jobs/transcribe")
+def start_transcribe_job(request: TranscribeJobRequest) -> dict:
+    """Transcribe a voice memo in the background; poll /api/jobs/{id}."""
+    asset = _transcribable_asset(request.asset_id)
+    status = transcription_status()
+    if not status.get("available"):
+        hint = status.get("hint", "Transcription is unavailable.")
+        raise HTTPException(status_code=409, detail=hint)
+
+    def runner(job_id: str) -> dict:
+        jobs.check_cancel(job_id)
+        text = transcribe_audio(asset.stored_path)
+        if not text:
+            raise RuntimeError("No speech was detected in this file.")
+        jobs.check_cancel(job_id)
+        return _commit_transcript(asset, text)
+
+    job = jobs.run_job(
+        "transcribe",
+        f"Transcribing {asset.file_name}",
+        runner,
+        total=1,
+    )
+    return {"job_id": job["id"], "job": job}
+
+
+class ReanalyzeJobRequest(BaseModel):
+    scope: str = "all"  # "all" or a project path prefix
+
+
+@app.post("/api/jobs/reanalyze")
+def start_reanalyze_job(request: ReanalyzeJobRequest) -> dict:
+    """Re-run analysis across the library (or one project) in the background.
+
+    The upgrade path for libraries analyzed before newer fields existed
+    (key mode, LUFS, richer search text). Analysis runs without holding the
+    state lock; results commit in one atomic index save at the end.
+    """
+    scope = request.scope.strip() or "all"
+    with STATE_LOCK:
+        targets = [
+            asset
+            for asset in ASSETS
+            if asset.stored_path
+            and Path(asset.stored_path).exists()
+            and Path(asset.file_name).suffix.lower() in supported_extensions()
+            and (
+                scope == "all"
+                or asset.project_name == scope
+                or asset.project_name.startswith(scope + "/")
+            )
+        ]
+        snapshot = [
+            (asset.id, asset.stored_path, asset.note, asset.project_name, asset.last_analyzed)
+            for asset in targets
+        ]
+    if not snapshot:
+        raise HTTPException(status_code=400, detail="Nothing to re-analyze in that scope.")
+
+    def runner(job_id: str) -> dict:
+        results = []
+        for index, entry in enumerate(snapshot, start=1):
+            asset_id, stored_path, note, project, expected_analyzed = entry
+            jobs.check_cancel(job_id)
+            fresh = ingest_file(
+                stored_path,
+                note=note,
+                project_name=project,
+                stored_path=stored_path,
+            )
+            results.append((asset_id, expected_analyzed, fresh))
+            jobs.set_progress(job_id, index, len(snapshot))
+        return _commit_batch_reanalysis(results)
+
+    job = jobs.run_job(
+        "reanalyze",
+        f"Re-analyzing {len(snapshot)} file(s)" + (f" in {scope}" if scope != "all" else ""),
+        runner,
+        total=len(snapshot),
+    )
+    return {"job_id": job["id"], "job": job}
+
+
+@mutation
+def _commit_batch_reanalysis(results: list) -> dict:
+    updated = 0
+    for asset_id, expected_analyzed, fresh in results:
+        asset = next((item for item in ASSETS if item.id == asset_id), None)
+        # Skip assets deleted or individually re-analyzed while the job ran.
+        if asset is None or asset.last_analyzed != expected_analyzed:
+            continue
+        asset.audio = fresh.audio
+        asset.midi = fresh.midi
+        asset.text = fresh.text
+        asset.kind = fresh.kind
+        asset.last_analyzed = fresh.last_analyzed
+        RETRIEVER.refresh_asset(asset)
+        updated += 1
+    return {"updated": updated, "considered": len(results)}
 
 
 @app.get("/api/validation")

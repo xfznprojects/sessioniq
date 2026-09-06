@@ -4,6 +4,7 @@ import math
 import os
 import struct
 import tempfile
+import time
 import wave
 from pathlib import Path
 
@@ -312,3 +313,163 @@ def test_reanalyze_rejects_missing_file(client: TestClient):
     asset_id = library["assets"][0]["id"]
     response = client.post(f"/api/assets/{asset_id}/reanalyze")
     assert response.status_code == 200  # note files re-parse fine
+
+
+def test_reference_nextup_digest_and_scan_endpoints(client: TestClient, tmp_path):
+    _upload_note(client, "Advisor Flow", b"TODO finalize the chain.")
+
+    assert client.get("/api/reference", params={"project": "Advisor Flow"}).json() == {
+        "reference": None,
+        "comparisons": [],
+    }
+    assert client.get("/api/reference", params={"project": "All Projects"}).status_code == 400
+
+    ranking = client.get("/api/next-up").json()["ranking"]
+    assert any(item["project_name"] == "Advisor Flow" for item in ranking)
+
+    digest = client.get("/api/digest").json()
+    assert digest["open_tasks"] >= 1
+    assert "generated_at" in digest
+
+    scan_dir = tmp_path / "bounces"
+    scan_dir.mkdir()
+    (scan_dir / "idea.txt").write_text("Scanned TODO: try a wider stereo image.", encoding="utf-8")
+    scanned = client.post("/api/library/scan", json={"path": str(scan_dir), "note": "from scan"})
+    assert scanned.status_code == 200, scanned.text
+    names = [asset["file_name"] for asset in scanned.json()["assets"]]
+    assert "idea.txt" in names
+    # The source folder is copied, not emptied.
+    assert (scan_dir / "idea.txt").exists()
+
+    missing = client.post("/api/library/scan", json={"path": str(tmp_path / "missing")})
+    assert missing.status_code == 400
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert client.post("/api/library/scan", json={"path": str(empty)}).status_code == 400
+
+
+def test_next_up_chat_answer_ranks_projects(client: TestClient):
+    _upload_note(client, "Rank Flow", b"TODO widen the stereo image.")
+    response = client.post(
+        "/api/chat", json={"question": "What should I finish next?"}
+    )
+    payload = response.json()
+    answer_lines = payload["answer"]["answer"].splitlines()
+    assert answer_lines[0] == "Finish these next:"
+    # A ranked, numbered list of projects with at least one citation.
+    assert len(answer_lines) >= 2 and answer_lines[1].startswith("1. ")
+    assert payload["answer"]["citations"]
+
+
+def test_chat_receives_summaries_for_ranking(client: TestClient, monkeypatch):
+    captured = {}
+
+    class FakeToolbox:
+        assets = []
+        touched = {}
+
+        def execute(self, *args, **kwargs):
+            return "{}"
+
+    import sessioniq.api as api_module
+
+    original = api_module.GroundedAssistant
+
+    class SpyAssistant(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            captured["summaries"] = kwargs.get("summaries")
+
+    monkeypatch.setattr(api_module, "GroundedAssistant", SpyAssistant)
+    _upload_note(client, "Summary Flow", b"TODO check levels.")
+    client.post("/api/chat", json={"question": "overview of the project"})
+    assert captured["summaries"], "assistant should receive project summaries"
+
+
+def test_job_lifecycle_transcribe(client: TestClient, monkeypatch):
+    payload = _upload_wav(client, "Job Flow", "voice_memo.wav")
+    asset_id = payload["assets"][0]["id"]
+    monkeypatch.setattr(
+        "sessioniq.api.transcription_status", lambda: {"available": True, "model": "test"}
+    )
+    monkeypatch.setattr(
+        "sessioniq.api.transcribe_audio", lambda path: "TODO re-record the second verse louder."
+    )
+
+    started = client.post("/api/jobs/transcribe", json={"asset_id": asset_id})
+    assert started.status_code == 200, started.text
+    job_id = started.json()["job_id"]
+
+    for _ in range(80):
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert job["status"] == "done", job
+    assert "updated" not in job  # result is the transcript commit payload
+    library = client.get("/api/library").json()
+    assert any(
+        a["file_name"].startswith("voice_memo-transcript") for a in library["assets"]
+    )
+    assert client.get("/api/jobs/missing").status_code == 404
+    assert client.get("/api/jobs").json()["jobs"]
+
+
+def test_batch_reanalyze_job_upgrades_and_reports(client: TestClient):
+    payload = _upload_wav(client, "Batch Flow", "old_analysis.wav")
+    asset_id = payload["assets"][0]["id"]
+
+    started = client.post("/api/jobs/reanalyze", json={"scope": "Batch Flow"})
+    assert started.status_code == 200, started.text
+    job_id = started.json()["job_id"]
+
+    for _ in range(120):
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert job["status"] == "done", job
+    assert job["progress"]["total"] == 1
+    assert job["result"]["updated"] == 1
+    library = client.get("/api/library").json()
+    refreshed = next(a for a in library["assets"] if a["id"] == asset_id)
+    assert refreshed["last_analyzed"]
+    assert refreshed["mode"] in {"major", "minor", None}
+
+    assert client.post("/api/jobs/reanalyze", json={"scope": "No Such Project"}).status_code == 400
+    cancel = client.post("/api/jobs/missing/cancel")
+    assert cancel.status_code == 404 or cancel.status_code == 409
+
+
+def test_cancelled_batch_job_preserves_library(client: TestClient, monkeypatch):
+    import sessioniq.jobs as jobs_module
+
+    _upload_wav(client, "Cancel Flow", "cancel_me.wav")
+    _upload_wav(client, "Cancel Flow", "second.wav")
+
+    original_ingest = __import__("sessioniq.api", fromlist=["ingest_file"]).ingest_file
+
+    def slow_ingest(path, *args, **kwargs):
+        # Cancel whatever reanalyze job is running; the runner thread may
+        # start before the POST response carries the id back to the test.
+        with jobs_module.JOB_LOCK:
+            running = [
+                job_id for job_id, job in jobs_module.JOBS.items() if job["status"] == "running"
+            ]
+        for job_id in running:
+            jobs_module.request_cancel(job_id)
+        return original_ingest(path, *args, **kwargs)
+
+    monkeypatch.setattr("sessioniq.api.ingest_file", slow_ingest)
+    started = client.post("/api/jobs/reanalyze", json={"scope": "Cancel Flow"})
+    job_id = started.json()["job_id"]
+    for _ in range(120):
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert job["status"] == "cancelled"
+    # The first file's analysis is discarded; the library still lists both files.
+    library = client.get("/api/library").json()
+    names = {a["file_name"] for a in library["assets"] if a["project_name"] == "Cancel Flow"}
+    assert {"cancel_me.wav", "second.wav"} <= names

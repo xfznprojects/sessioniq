@@ -156,8 +156,6 @@ def project_health(assets: list[ProjectAsset], tasks: list[ProjectTask]) -> Proj
         HealthCheck(label="Master / export", ok=has_master),
         HealthCheck(label="Tasks cleared", ok=tasks_clear),
     ]
-    score = sum(check.ok for check in checks) / len(checks)
-
     suggestions: list[str] = []
     if not has_audio:
         suggestions.append("Import at least one audio file.")
@@ -170,6 +168,27 @@ def project_health(assets: list[ProjectAsset], tasks: list[ProjectTask]) -> Proj
     if open_tasks:
         suggestions.append(f"Finish {len(open_tasks)} open task(s).")
 
+    # Loudness gate only when a master with a measured LUFS exists — older
+    # libraries gain it after re-analysis instead of failing blindly.
+    target = float(os.getenv("SESSIONIQ_LUFS_TARGET", "-14"))
+    measured = [
+        asset.audio.integrated_lufs
+        for asset in assets
+        if asset.audio
+        and asset.status == FileStatus.READY
+        and asset.audio.integrated_lufs is not None
+    ]
+    if measured:
+        best = min(measured, key=lambda value: abs(value - target))
+        on_target = abs(best - target) <= 2.0
+        checks.append(HealthCheck(label="Master loudness on target", ok=on_target))
+        if not on_target:
+            suggestions.append(
+                f"Master measures {best:.1f} LUFS vs the {target:.0f} target "
+                f"(SESSIONIQ_LUFS_TARGET); adjust or re-check the export."
+            )
+
+    score = sum(check.ok for check in checks) / len(checks)
     return ProjectHealth(score=score, checks=checks, suggestions=suggestions)
 
 
@@ -407,8 +426,8 @@ def build_session_report(
         lines.append("_None — everything captured in notes is done._")
 
     lines.extend(["", "## Files", ""])
-    lines.append("| File | Type | Status | BPM | Key | Length | Project |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| File | Type | Status | BPM | Key | LUFS | Length | Project |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for asset in sorted(assets, key=lambda item: (item.project_name, item.file_name)):
         bpm = _asset_bpm(asset)
         key = _asset_key(asset)
@@ -421,10 +440,15 @@ def build_session_report(
         )
         length = f"{duration:.0f}s" if duration else "—"
         mode = f" {asset.audio.mode_estimate}" if asset.audio and asset.audio.mode_estimate else ""
+        lufs = (
+            f"{asset.audio.integrated_lufs:.1f}"
+            if asset.audio and asset.audio.integrated_lufs is not None
+            else "—"
+        )
         lines.append(
             f"| {asset.file_name} | {asset.kind.value} | {asset.status.value} "
             f"| {f'{bpm:.0f}' if bpm else '—'} | {key + mode if key else '—'} "
-            f"| {length} | {asset.project_name} |"
+            f"| {lufs} | {length} | {asset.project_name} |"
         )
 
     noted = [

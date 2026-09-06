@@ -14,6 +14,8 @@ export type AudioMetadata = {
   peak_db?: number | null;
   rms_amplitude?: number | null;
   rms_db?: number | null;
+  /** Integrated loudness (ITU-R BS.1770-4) in LUFS. */
+  integrated_lufs?: number | null;
   spectral_centroid_mean?: number | null;
   energy_series: number[];
   spectral_centroid_series: number[];
@@ -174,6 +176,42 @@ export type AiStatus = {
   vector_search: boolean;
   transcription: { available: boolean; model: string; hint?: string };
   hints: string[];
+};
+
+export type ReferenceComparison = {
+  reference: { asset_id: string; file_name: string } | null;
+  comparisons: {
+    asset_id: string;
+    file_name: string;
+    deltas: Record<string, number | null>;
+  }[];
+};
+
+export type NextUpEntry = {
+  project_name: string;
+  score: number;
+  progress: number;
+  readiness: number;
+  stalled: boolean;
+  open_tasks: number;
+  reasons: string[];
+};
+
+export type WeeklyDigest = {
+  stalled: {
+    asset_id: string;
+    file_name: string;
+    project_name: string;
+    days_idle: number;
+    status: string;
+  }[];
+  stalled_count: number;
+  ready_to_ship: { asset_id: string; file_name: string; project_name: string }[];
+  ready_count: number;
+  added_this_week: { count: number; files: string[] };
+  open_tasks: number;
+  projects_without_reference: string[];
+  generated_at: string;
 };
 
 export type Decision = {

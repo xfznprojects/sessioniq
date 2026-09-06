@@ -1,8 +1,10 @@
 import { motion } from "framer-motion";
 import {
+  CalendarClock,
   CircleHelp,
   GitCompareArrows,
   Lightbulb,
+  ListChecks,
   MessageSquareQuote,
   Search,
   Sparkles,
@@ -15,7 +17,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, Card, SectionTitle, Stat } from "./ui";
 import { requestJson } from "../lib/api";
 import { cn, EASE_OUT } from "../lib/utils";
-import type { Feedback, QueryLogEntry, QueryLogResponse, SessionAsset } from "../types";
+import type {
+  Feedback,
+  NextUpEntry,
+  QueryLogEntry,
+  QueryLogResponse,
+  SessionAsset,
+  WeeklyDigest
+} from "../types";
 
 const stagger = (index: number) => ({
   initial: { opacity: 0, y: 8 },
@@ -54,10 +63,119 @@ export function InsightsView({
   return (
     <div className="space-y-6">
       <CreativeInsights onRunInsight={onRunInsight} />
+      <NextUpCard onAsk={onRunInsight} />
+      <WeeklyDigestCard />
       <SemanticSearch scope={scope} />
       <SimilarityEngine assets={assets} />
       <QueryLogCard />
     </div>
+  );
+}
+
+function NextUpCard({ onAsk }: { onAsk: (question: string) => void }) {
+  const [entries, setEntries] = useState<NextUpEntry[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    fetch("/api/next-up")
+      .then(response => response.json())
+      .then(data => setEntries(data.ranking ?? []))
+      .catch(() => setError("Could not load the ranking."));
+  }, []);
+
+  return (
+    <Card className="p-4">
+      <SectionTitle
+        icon={<ListChecks className="size-5" />}
+        title="What to Finish Next"
+        subtitle="Ranked by readiness, task progress, and how recently you touched it."
+      />
+      {error && <p role="alert" className="mt-3 text-sm text-danger">{error}</p>}
+      {entries === null && !error && <p role="status" className="mt-3 text-sm text-muted-foreground">Ranking your projects…</p>}
+      {entries?.length === 0 && (
+        <p className="mt-3 text-sm text-muted-foreground">Upload files to get a ranking.</p>
+      )}
+      <div className="mt-3 space-y-2">
+        {entries?.slice(0, 5).map((entry, index) => (
+          <div
+            key={entry.project_name}
+            className="flex items-start justify-between gap-3 rounded-md border border-border bg-background/40 p-2.5"
+          >
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">
+                <span className="mr-1.5 text-muted-foreground">{index + 1}.</span>
+                {entry.project_name}
+              </p>
+              <p className="mt-0.5 truncate text-xs text-muted-foreground">{entry.reasons.join(" · ")}</p>
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {entry.stalled && <Badge tone="amber">stalled</Badge>}
+              {entry.open_tasks > 0 && <Badge tone="neutral">{entry.open_tasks} open</Badge>}
+            </div>
+          </div>
+        ))}
+      </div>
+      {entries && entries.length > 0 && (
+        <Button size="sm" variant="ghost" className="mt-3" onClick={() => onAsk("What should I finish next?")}>
+          <Wand2 className="size-3.5" /> Ask the assistant why
+        </Button>
+      )}
+    </Card>
+  );
+}
+
+function WeeklyDigestCard() {
+  const [digest, setDigest] = useState<WeeklyDigest | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    fetch("/api/digest")
+      .then(response => response.json())
+      .then(setDigest)
+      .catch(() => setError("Could not load the digest."));
+  }, []);
+
+  return (
+    <Card className="p-4">
+      <SectionTitle
+        icon={<CalendarClock className="size-5" />}
+        title="Weekly Digest"
+        subtitle="The catalog at a glance — what stalled, what shipped, what's new."
+      />
+      {error && <p role="alert" className="mt-3 text-sm text-danger">{error}</p>}
+      {!digest && !error && <p role="status" className="mt-3 text-sm text-muted-foreground">Summarizing your library…</p>}
+      {digest && (
+        <>
+          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <Stat label="Stalled" value={digest.stalled_count} hint="Untouched 14+ days with work left" />
+            <Stat label="Ready to ship" value={digest.ready_count} />
+            <Stat label="Added this week" value={digest.added_this_week.count} />
+            <Stat label="Open tasks" value={digest.open_tasks} />
+          </div>
+          {digest.stalled.length > 0 && (
+            <div className="mt-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Stalled the longest</p>
+              <ul className="mt-1.5 space-y-1 text-sm">
+                {digest.stalled.slice(0, 5).map(item => (
+                  <li key={item.asset_id} className="flex items-center justify-between gap-2 text-muted-foreground">
+                    <span className="truncate">
+                      <span className="text-foreground">{item.file_name}</span> · {item.project_name}
+                    </span>
+                    <span className="shrink-0 text-xs text-warning">{item.days_idle}d idle</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {digest.projects_without_reference.length > 0 && (
+            <p className="mt-3 text-xs text-muted-foreground">
+              No reference track yet: {digest.projects_without_reference.slice(0, 4).join(", ")}
+              {digest.projects_without_reference.length > 4 ? ", …" : ""}
+            </p>
+          )}
+        </>
+      )}
+    </Card>
   );
 }
 

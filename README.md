@@ -12,7 +12,7 @@ and answers questions about your work **with citations to the exact files it use
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-38BDF8?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
-[![Tests](https://img.shields.io/badge/tests-132_passing-2ea44f)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-143_passing-2ea44f)](#-testing)
 [![Ruff](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)](https://docs.astral.sh/ruff/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -40,8 +40,10 @@ the exact source files—not another confident AI guess.
 | **“Where is the right file?”** | One organized album/song workspace with search, smart collections, tags, statuses, and files that move on disk when projects move. |
 | **“What is actually finished?”** | Project Health, completion checks, automatically extracted action items, and progress tracking across every song. |
 | **“What do we already have that fits?”** | Meaning-based search plus track similarity across tempo, key, brightness, loudness, and duration. |
-| **“What did we decide last time?”** | Notes, session history, creative preferences, and a library-wide producer fingerprint that persist between sessions. |
-| **“Can I trust this AI answer?”** | File-level citations and a Quality Report with confidence, grounding, hallucination risk, model provenance, latency, and token usage. |
+| **“What did we decide last time?”** | Notes, a decision log, creative preferences, and a library-wide producer fingerprint that persist between sessions. |
+| **“How does my mix compare to the reference?”** | Signed deltas against a reference track — loudness, LUFS, tone, and length — plus a loudness target on every master. |
+| **“What should I work on next?”** | A readiness × progress × freshness ranking across every project, and a weekly digest of what stalled, shipped, or needs a decision. |
+| **“Can I trust this AI answer?”** | File-level citations and a Quality Report with confidence, grounding, model provenance, latency, token usage, and your own feedback. |
 | **“Can I keep sensitive work private?”** | A fully offline baseline with optional local Ollama and local vector search; cloud AI is an upgrade, not a requirement. |
 
 ### Built for the people responsible for getting music over the finish line
@@ -76,8 +78,8 @@ files, facts, decisions, and next actions around them.
 ## Overview
 
 SessionIQ is **not** a DAW plugin and it does not generate music. It's a smart project notebook and
-**LLM-ops-grade AI workflow**: ingestion → analysis → embeddings → vector retrieval → a grounded
-assistant → validation → explainability — wrapped in a polished, keyboard-friendly dashboard.
+**LLM-ops-grade AI workflow**: ingestion → analysis → retrieval → a grounded assistant → validation
+→ explainability — wrapped in a polished, keyboard-friendly dashboard.
 
 Answers cite project files and include a **Quality Report** with citation checks, numeric checks,
 model provenance, latency, and token usage. These checks do not verify every claim or measure
@@ -91,37 +93,118 @@ configured, and semantic search degrades gracefully to lexical when embeddings a
 | | |
 | --- | --- |
 | 🗂️ **Albums & songs** | Nested folder tree — create an album, drop songs inside it, rename (files move on disk), drag files between projects, right-click to delete. |
-| 🎚️ **Real analysis** | librosa (BPM, key + major/minor mode, peak/RMS dB, brightness, beats) · pretty_midi (notes, pitch range, tempo) · note/task extraction. |
-| 🤖 **Grounded assistant** | Answers cite the files used. **Multi-turn**: ask "what about its key?" and follow-ups resolve against the previous answer. **Streams live** — interpretation, tool calls, and answer text arrive as they happen. Runs a **local Ollama model**, **OpenAI**, or a deterministic offline engine — automatically. |
-| 🔧 **Tool-backed answers** | With an LLM configured, the assistant queries your metadata through tools (filter, aggregate, superlatives, similarity) so counts and comparisons are exact — even over 1000+ files. |
-| 🔎 **Semantic search & similarity** | Find files by meaning ("tracks that still need mastering") and compare tracks — *"Afterglow is 66% similar to Midnight Drive"* — with a per-dimension breakdown. Tempo folds double/half-time, and key compatibility follows the circle of fifths (relative minors, fourths/fifths). |
-| 📊 **Quality Report** | Per-answer confidence, grounding, hallucination risk, provenance (model / prompt version / temperature / latency / tokens / tools used) and automated citation/numeric checks with explicit limitations. Recorded decisions and note text count as grounded claims. |
-| 🧾 **Query log & feedback** | Every question is logged with its quality report; thumbs up/down plus an "unanswered questions" backlog show where the library needs more (or better) sources. |
-| 🩺 **Project Health** | Completeness score + checklist (audio, notes, reference, master, tasks) + actionable suggestions. |
-| 🧠 **AI Memory** | A producer "creative fingerprint" derived from your library, editable preferences, and a **decision log** — record what you chose ("locked 96 BPM") and the assistant can quote it back with citations. |
-| 🎤 **Voice memo transcription** | Optional local Whisper (`pip install -e ".[voice]"`) turns recordings into notes with extracted tasks. |
-| 📄 **Session reports** | One-click Markdown handoff report per project (or the whole library): status, readiness, tasks, files, notes, decisions. |
-| 🕵️ **Duplicate detection** | A "Possible Duplicates" smart collection flags same-length, same-tempo bounces before they multiply. |
-| ⏱️ **Time-linked playback** | "Jump to loudest moment" and "play from first beat" seek the bottom player using the stored analysis series. |
+| 📂 **Folder import** | Point SessionIQ at a folder of bounces — files are copied in, analyzed, and organized; originals stay untouched. |
+| 🕵️ **Duplicate detection** | A “Possible Duplicates” smart collection flags same-length, same-tempo bounces before they multiply — a hint, never an auto-delete. |
+| 🎚️ **Real analysis** | librosa (BPM, key with major/minor mode, peak/RMS dB, brightness, beats, integrated LUFS) · pretty_midi (notes, pitch range, tempo) · note/task extraction. |
+| 🎯 **Delivery checks** | Integrated loudness measured to ITU-R BS.1770-4 and checked against a configurable LUFS target in every project's readiness list. |
+| ⏱️ **Time-linked playback** | “Jump to loudest moment” and “play from first beat” seek the bottom player using stored analysis series. |
+| 🤖 **Grounded assistant** | Answers cite the files used. It holds a conversation — ask “what about its key?” — and streams live: interpretation, tool calls, and text arrive as they happen. Runs a **local Ollama model**, **OpenAI**, or a deterministic offline engine, automatically. |
+| 🔧 **Tool-backed answers** | With an LLM configured, the assistant queries your metadata through tools (filter, aggregate, superlatives, similarity, ranking) so counts and comparisons stay exact — even over 1,000+ files. |
+| 📊 **Quality Report** | Per-answer confidence, grounding, provenance (model / prompt version / temperature / latency / tokens / tools used) and automated citation/numeric checks with explicit limitations. |
+| 🧠 **AI memory** | A producer “creative fingerprint” derived from your library, editable preferences, and a **decision log** — record what you chose (“locked 96 BPM”) and the assistant quotes it back with citations. |
+| 🧾 **Query log & feedback** | Every question is logged with its provenance; thumbs up/down and an “unanswered questions” backlog show where the library needs more (or better) sources. |
+| 🔎 **Semantic search & similarity** | Find files by meaning (“tracks that still need mastering”) and compare tracks with a per-dimension breakdown. Tempo folds double/half-time; key compatibility follows the circle of fifths. |
+| ⚖️ **Reference A/B** | Mark a track as Reference and every mix gets signed deltas against it — loudness, LUFS, tone, length. |
+| 🧭 **Next-up & digest** | Projects ranked by readiness, progress, and freshness — ask “what should I finish next?” in chat, or read the weekly digest of stalled work, ready masters, and new uploads. |
+| 🩺 **Project Health** | Completeness score and checklist: audio, notes, reference, master, tasks, and master loudness vs target — with actionable suggestions. |
+| 🎤 **Voice memo transcription** | Optional local Whisper turns recordings into notes with extracted tasks. |
+| 📄 **Session reports** | One-click Markdown handoff per project (or the whole library): status, readiness, tasks, files, notes, decisions. |
 | 🏷️ **Custom tags** | Manual, color-coded tag pills alongside AI-suggested ones. |
 | 🎨 **Design** | Token-driven design system (light/dark), tasteful motion, and category color-coding for fast scanning. |
+
+## 🔍 Features in depth
+
+### The assistant
+
+The right rail holds a conversation, not a search box. Follow-ups like *“what about its key?”* are
+rewritten into standalone questions before retrieval — a deterministic file-name heuristic handles
+most of them for free, and a model call handles the rest when one is configured. Each answer shows
+how your follow-up was interpreted, cites the exact files used with the metadata field or note text
+behind every claim, and carries a Quality Report you can expand. Any answer can be saved to the
+decision log with one click.
+
+With a model configured (Ollama or OpenAI), the assistant can also *act*: it calls metadata tools to
+filter, aggregate, rank, and compare before answering, so “how many unfinished tracks are in minor
+keys under 100 BPM?” is computed from the real library rather than guessed from truncated text.
+Every asset a tool touches becomes a validated, citable source. Without a model, the deterministic
+engine answers questions about tempo, key, loudness, tasks, statuses, decisions, and rankings —
+fully offline, same citations.
+
+Answers stream over server-sent events: you see the interpretation of your question, each tool call
+as it runs, and the answer text as it is written. Every question lands in the query log with its
+provenance and your thumbs up/down, building a picture of what the library can and cannot answer
+yet.
+
+### Analysis
+
+Every audio file is analyzed for tempo, key (with major/minor mode), peak/RMS dB, integrated
+loudness (LUFS, ITU-R BS.1770-4), spectral brightness, and beat positions; MIDI files for notes,
+pitch and velocity ranges, instruments, and tempo. Analysis runs at 22.05 kHz mono (the file's true
+sample rate is still recorded) — musical features don't need ultrasonics, and this keeps analysis
+fast and light on modest hardware.
+
+Each project's readiness checklist compares your master's loudness against a target
+(`SESSIONIQ_LUFS_TARGET`, default −14 for streaming) and tells you how far off it is. Any file can
+be re-analyzed in place — keeping its status, tags, and notes — and **Upgrade analysis** re-runs the
+whole library or one project as a background job with progress, so an existing library picks up
+fields from newer analyzers without re-uploading anything.
+
+### Comparing and deciding
+
+The similarity engine compares tracks across tempo, brightness, loudness, length, and key — with
+per-dimension breakdowns you can actually reason about. It understands that 90 and 180 BPM can be
+the same groove, and that a fifth up or a relative minor is a compatible key, not a mismatch.
+
+Mark a track as **Reference** and every mix in the project is measured against it: signed deltas for
+loudness, LUFS, tone, and length, so “my master is 6 dB quieter than the reference” becomes a fact
+instead of a feeling. Decisions you record — in Studio or straight from an assistant answer —
+persist with the library, are searchable, and can be quoted back with citations. One click exports
+a Markdown session report: status, readiness, open tasks, every file's measurements, notes, and
+decisions — the handoff document that used to live in a spreadsheet.
+
+### What to finish next
+
+Projects are ranked by a blend of readiness (health checks), task progress, and freshness, with
+near-finished-but-stale projects flagged as stalled rather than buried. The ranking appears in
+Insights, answers the question in chat, and the weekly digest summarizes what's stalled, what's
+ready to ship, what arrived this week, and which projects still lack a reference track.
+
+### Library and files
+
+Uploads are staged and committed as a batch — a failed import leaves nothing behind. The upload
+panel also imports a whole folder of bounces (copied, never moved; bounded to 500 files and 512 MB
+each). Files live in real album/song folders on disk, move when you rename a project, and deleted
+files go to a recoverable trash with a manifest rather than disappearing.
+
+Smart collections cover the usual questions (needs work, needs mastering, ready to export, similar
+BPM, same key) plus **Possible Duplicates**. The bottom player persists across views, remembers
+where you left off, and can jump to a track's loudest moment or first beat. Note drafts and player
+position are kept in the browser; saved notes feed tasks and the assistant.
+
+### Jobs and performance
+
+Long tasks — voice-memo transcription, batch re-analysis — run as background jobs with live
+progress and cancellation, so the interface never waits minutes on a single request. Retrieval
+caches each file's search text (invalidated on every metadata change) and blends lexical, metadata,
+and vector scores with fixed normalized weights, so asking questions stays quick as the library
+grows past a thousand files.
 
 ## 🖼️ A tour
 
 <table>
 <tr>
-<td width="50%"><img src="docs/insights.png" alt="Insights view" /><br/><b>Insights</b> — semantic search, the similarity engine, and creative cross-library prompts.</td>
+<td width="50%"><img src="docs/insights.png" alt="Insights view" /><br/><b>Insights</b> — what to finish next, the weekly digest, semantic search, the similarity engine, and the query log.</td>
 <td width="50%"><img src="docs/pipeline.png" alt="Pipeline view" /><br/><b>Pipeline</b> — a live diagram of the real ingestion → retrieval → generation → validation path, plus the analyzer plugin registry.</td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/studio.png" alt="Studio view" /><br/><b>Studio</b> — AI Memory (creative fingerprint) and a git-like session timeline.</td>
+<td width="50%"><img src="docs/studio.png" alt="Studio view" /><br/><b>Studio</b> — AI memory, the decision log, and a git-like session timeline.</td>
 <td width="50%" valign="top">
 
 **Four workspaces, one docked assistant**
 
-- **Workspace** — library, project health, file table/grid, inspector
-- **Insights** — semantic search, similarity engine, creative insights
-- **Studio** — AI memory, session timeline
+- **Workspace** — library, file table/grid, inspector, readiness, mix-vs-reference
+- **Insights** — next-up ranking, digest, search, similarity, query log
+- **Studio** — AI memory, decisions, session timeline
 - **Pipeline** — architecture diagram + plugin registry
 
 The right rail has **Assistant / Tasks** tabs, with answer checks under an expandable section.
@@ -135,10 +218,10 @@ A persistent bottom player continues across views and remembers the last track a
 
 ```mermaid
 flowchart LR
-  U["Upload<br/>audio · MIDI · notes · images"] --> API["FastAPI backend"]
+  U["Upload · folder import<br/>audio · MIDI · notes · images"] --> API["FastAPI backend"]
   API --> STORE[".sessioniq-data/<br/>album/song folders"]
   API --> INGEST["Ingestion router"]
-  INGEST --> AUDIO["librosa"]
+  INGEST --> AUDIO["librosa + LUFS"]
   INGEST --> MIDI["pretty_midi"]
   INGEST --> NOTES["note / task extraction"]
   AUDIO --> META["ProjectAsset metadata"]
@@ -147,16 +230,19 @@ flowchart LR
   META --> EMB["Embeddings<br/>ChromaDB (optional)"]
   META --> RET["Hybrid retriever<br/>lexical + vector"]
   EMB --> RET
-  RET --> AI["Grounded assistant<br/>Ollama · OpenAI · rules"]
+  RET --> AI["Grounded assistant<br/>tools · Ollama · OpenAI · rules"]
   AI --> VAL["Validation + Quality Report"]
+  META --> ADV["Advisor<br/>A/B · next-up · digest"]
   META --> SIM["Similarity · Health · AI Memory"]
   VAL --> FE["React dashboard"]
+  ADV --> FE
   SIM --> FE
 ```
 
 ## 🧰 Tech stack
 
-**Backend** — Python 3.11+, FastAPI, Uvicorn, Pydantic, librosa, numpy, soundfile, pretty_midi/mido, ChromaDB (optional), OpenAI SDK (OpenAI **or** Ollama).
+**Backend** — Python 3.11+, FastAPI, Uvicorn, Pydantic, librosa, numpy, soundfile, pretty_midi/mido,
+scipy (K-weighted loudness), ChromaDB (optional), faster-whisper (optional), OpenAI SDK (OpenAI **or** Ollama).
 **Frontend** — React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Table, Recharts, HTML audio, Framer Motion, Lucide, music-metadata.
 **Quality** — Pytest, Ruff, `tsc` + Vite build.
 
@@ -194,9 +280,10 @@ Open **http://127.0.0.1:5173** and you're in. Runtime uploads live under `.sessi
 ### Demo content
 
 The repo ships **no audio**. `scripts/seed_demo.py` generates royalty-free demo content entirely in
-code — synthesized WAV loops (with real, varied BPM/key), a MIDI progression, mix notes, and gradient
-album artwork — organized as an album with songs plus standalone projects. Safe to showcase and
-screenshot; re-runnable anytime.
+code — synthesized WAV loops with real, varied BPM, key, and loudness (including a quieter reference
+bounce per song so Mix-vs-Reference shows live data), a MIDI progression, mix notes, demo decisions,
+and gradient album artwork — organized as an album with songs plus standalone projects. Safe to
+showcase and screenshot; re-runnable anytime.
 
 ### Optional: smarter AI (never shipped, always local-first)
 
@@ -206,6 +293,7 @@ SessionIQ works offline with a deterministic answer engine. To upgrade:
   `.env.example` → `.env` and set `OPENAI_BASE_URL=http://localhost:11434/v1` and `SESSIONIQ_MODEL=llama3.2`.
 - **OpenAI** — set `OPENAI_API_KEY` in `.env`.
 - **Semantic vector search** — `pip install -e ".[vector]"` for local ChromaDB embeddings.
+- **Voice memo transcription** — `pip install -e ".[voice]"` for local Whisper (`SESSIONIQ_WHISPER_MODEL` picks the size).
 
 Run `.\.venv\Scripts\python.exe scripts\check_local_ai.py` to see what's active and get setup hints.
 Models and vector indexes download to your machine's cache — they are **never committed**.
@@ -215,9 +303,9 @@ Models and vector indexes download to your machine's cache — they are **never 
 ```
 sessioniq/
 ├── src/sessioniq/          # FastAPI backend
-│   ├── api.py              # endpoints (library, chat, search, similar, memory, pipeline…)
+│   ├── api.py              # endpoints (library, chat+stream, search, jobs, reports…)
 │   ├── ingestion.py        # file → ProjectAsset router
-│   ├── audio_analysis.py   # librosa analysis (+ WAV fallback)
+│   ├── audio_analysis.py   # librosa + LUFS analysis (+ WAV fallback)
 │   ├── midi_analysis.py    # pretty_midi (+ mido fallback)
 │   ├── retrieval.py        # hybrid lexical + ChromaDB vector retriever
 │   ├── conversation.py     # follow-up questions → standalone questions
@@ -225,12 +313,14 @@ sessioniq/
 │   ├── assistant.py        # grounded answers + quality metadata (Ollama/OpenAI/rules)
 │   ├── validation.py       # citation & grounding checks
 │   ├── insights.py         # similarity engine + producer profile
+│   ├── advisor.py          # reference A/B, finish-next ranking, weekly digest
 │   ├── transcription.py    # optional local Whisper voice-memo transcription
+│   ├── jobs.py             # in-process background jobs (progress, cancel)
 │   ├── plugins.py          # analyzer registry
-│   └── project_workspace.py# projects, smart collections, health, file ops
+│   └── project_workspace.py# projects, smart collections, health, reports, file ops
 ├── web/src/                # React + TypeScript dashboard
 │   ├── App.tsx
-│   └── components/         # Sidebar, Pipeline, Insights, Studio, ContextMenu, ui
+│   └── components/         # Sidebar, Chat, Inspector, Insights, Studio, Pipeline, Player…
 ├── scripts/                # run_api, run_streamlit, seed_demo, check_local_ai
 └── tests/                  # pytest suite
 ```
@@ -238,81 +328,39 @@ sessioniq/
 ## 🧪 Testing
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest        # 132 passing
+.\.venv\Scripts\python.exe -m pytest        # 143 passing
 .\.venv\Scripts\python.exe -m ruff check .
 cd web; npm test                            # frontend scope regressions
 npm run build                               # tsc + vite build
 ```
 
-## Workspace and safety update
+## 🗄️ Library persistence and recovery
 
-- Smart Collections now filter the file list; project cards open the selected workspace.
-  A "Possible Duplicates" collection flags same-length, same-tempo bounces that also
-  share a filename token or near-identical loudness/brightness — always a hint, never
-  an auto-delete.
-- Files appear near the top, with compact project navigation and expandable readiness/analysis.
-- The bottom player supports play/pause, seeking, volume, previous/next track, and local resume.
-  Space toggles playback outside input controls; Alt+Left/Right switches tracks.
-  The inspector can jump the player to the loudest moment or the first detected beat.
-- The assistant keeps a conversation (persisted in the browser across reloads): follow-up
-  questions ("what about its key?") are rewritten into standalone questions (LLM
-  condensation when a model is configured, a deterministic file-name heuristic offline)
-  before retrieval. Answers stream over server-sent events — interpretation, tool calls,
-  and text arrive as they happen — and each answer shows how the follow-up was interpreted.
-  "Save as decision" files an answer into the decision log.
-- With an LLM configured, answers can call metadata tools (search, filter, compute
-  min/max/avg/count, asset details, similarity, project list) for exact aggregate
-  answers; every asset a tool touches is validated as a citable source. The offline
-  rules engine is unchanged.
-- Recorded decisions live in Studio → Decisions, persist with the library index, and
-  are quotable by the assistant (numbers quoted from decisions and note text pass the
-  grounding checks). "Export report" downloads a Markdown session report for the
-  selected project or the whole library.
-- Every question lands in a query log (Insights → Query Log) with its provenance and
-  thumbs up/down; the "unanswered only" filter shows the backlog of questions the
-  library could not ground.
-- "Re-analyze" on any file re-runs analysis on the stored file while keeping its id,
-  status, tags, and notes — the upgrade path for libraries analyzed before newer
-  fields (key mode, richer search text) existed.
-- Voice memo transcription is an optional local extra
-  (`pip install -e ".[voice]"`, model via `SESSIONIQ_WHISPER_MODEL`): transcribe an
-  audio file into a note asset with extracted tasks.
-- Note drafts are retained in this browser. Save notes (or Ctrl/Cmd+Enter) to update the library,
-  tasks, and assistant context. Drafts and player resume data are local to the browser origin.
-- Completed tasks keep their status after renaming/moving projects. Existing task IDs are migrated
-  in memory on load and persisted on the next successful save. Artwork does not count as reference audio.
-- Saved preferences and current task statuses are supplied to the optional LLM. The offline rules
-  engine uses saved task statuses, but does not personalize its wording from preferences.
-- Imports are staged as a batch and committed only after every file succeeds. Audio analysis runs
-  in a worker thread; each file is limited to 512 MB. A durable job queue with per-file progress,
-  cancellation, and retry is not yet implemented.
+SessionIQ is a single-process local app by design. Writes are serialized within the API process and
+the library index is replaced atomically, with the previous version retained as
+`library-index.json.bak` in the data directory. Do not point multiple API workers at the same
+library — this is not a multi-process database.
 
-### Library persistence and recovery
+Upload folders carry a hash of the project name to prevent slug and case collisions, and existing
+file paths stay valid across renames. Deleting an asset moves its file outside the served upload
+tree into `trash/<id>/` next to a `manifest.json` recording the original path, asset metadata, and
+task statuses — recovery copies are kept until you remove them by hand (there is no trash-management
+UI yet, so that space is not reclaimed automatically).
 
-Run one API process per library. Writes are serialized within that process. The index is replaced
-atomically and its previous version retained as `library-index.json.bak` in the data directory.
-Do not run multiple API workers against the same library; this is not a multi-process database.
+If the process dies at a bad moment, startup recovery relinks assets whose file is missing whenever
+exactly one unreferenced file with the same name exists under uploads (the typical interrupted
+rename); anything ambiguous keeps its metadata and is flagged with a “File missing” badge. Stale
+upload staging directories older than 24 hours are cleaned up at startup. These are heuristics, not
+a crash-atomic database: for recovery, stop the API, keep the data directory, and use the manifest
+and `.bak` index. Ordinary failed changes roll back in-process automatically.
 
-New upload folders include a hash of the exact project name to prevent slug/case collisions.
-Existing file paths remain valid. Deletes only remove files owned by the selected assets and move
-those files outside the served upload tree into `trash/<id>/`, alongside `manifest.json` containing
-original paths, asset metadata, and task statuses. These recovery copies are retained indefinitely;
-there is no trash-management UI yet, so disk space is not reclaimed automatically.
+### Known limits
 
-For recovery, stop the API, preserve the current data directory, and use the manifest to restore
-files and metadata. A damaged index can be replaced with its `.bak` copy. The backup is one save
-behind and must be reconciled with any files moved since that save; it is not a complete filesystem
-snapshot. Ordinary failed mutations roll back in-process.
-
-On startup the API attempts light recovery: assets whose file is missing are relinked when exactly
-one unreferenced file with the same name exists under the uploads directory (typical for a process
-killed between file moves and the index save). Ambiguous or absent files keep their metadata, are
-flagged `file_missing` in the API and shown with a "File missing" badge in the UI, and may still
-require manual recovery. Stale upload staging directories older than 24 hours are removed at
-startup. These are heuristics, not a crash-atomic database: a crash mid-move can still split a
-project across old and new names until you tidy it manually.
-
-Version comparison and timestamp-linked notes remain follow-up work.
+- One API process per library; running background jobs do not survive a restart (their finished
+  effects do).
+- Automated answer checks verify citations and numeric claims against sources — they do not measure
+  hallucination risk in general.
+- Version comparison between bounces and timestamp-linked notes are not implemented yet.
 
 ## 📄 License
 

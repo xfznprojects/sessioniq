@@ -17,6 +17,7 @@ import {
   FileAudio,
   FileDown,
   FileText,
+  FolderInput,
   Gauge,
   Grid2X2,
   HeartPulse,
@@ -26,6 +27,7 @@ import {
   ListChecks,
   Moon,
   Music4,
+  RefreshCw,
   Search,
   Sun,
   Telescope,
@@ -61,6 +63,7 @@ import type {
   ProjectHealth,
   ProjectSummary,
   QualityReport,
+  ReferenceComparison,
   SessionAsset,
   TaskStatus
 } from "./types";
@@ -148,6 +151,8 @@ export default function App() {
   const [playerSeek, setPlayerSeek] = useState<PlayerSeek | null>(null);
   const [transcribingId, setTranscribingId] = useState<string | null>(null);
   const [reanalyzingId, setReanalyzingId] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [batchJob, setBatchJob] = useState<{ label: string; done: number; total: number | null } | null>(null);
   const seekNonce = useRef(0);
   const [validation, setValidation] = useState<any>({ checks: [] });
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
@@ -405,12 +410,62 @@ export default function App() {
     if (transcribingId) return;
     setTranscribingId(asset.id);
     await perform(async () => {
-      await requestJson(`${API}/api/assets/${encodeURIComponent(asset.id)}/transcribe`, {
-        method: "POST"
-      });
+      // Background job: Whisper can take minutes, the request must not wait.
+      await runJobToCompletion(`${API}/api/jobs/transcribe`, { asset_id: asset.id });
       await refreshLibrary();
     });
     setTranscribingId(null);
+  }
+  async function upgradeAnalysis() {
+    if (batchJob) return;
+    setBatchJob({ label: "Starting…", done: 0, total: null });
+    const scope = selectedProject === "All Projects" ? "all" : selectedProject;
+    await perform(async () => {
+      await runJobToCompletion(`${API}/api/jobs/reanalyze`, { scope }, progress => {
+        setBatchJob({
+          label: "Re-analyzing",
+          done: progress.done,
+          total: progress.total ?? null,
+        });
+      });
+      await refreshLibrary();
+    });
+    setBatchJob(null);
+  }
+  async function runJobToCompletion(
+    url: string,
+    body: unknown,
+    onProgress?: (progress: { done: number; total: number | null }) => void
+  ): Promise<unknown> {
+    const started = await requestJson<{ job_id: string }>(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      const job = await requestJson<{ status: string; progress: { done: number; total: number | null }; result: unknown; error: string | null }>(
+        `${API}/api/jobs/${encodeURIComponent(started.job_id)}`
+      );
+      onProgress?.(job.progress);
+      if (job.status === "done") return job.result;
+      if (job.status === "cancelled") return null;
+      if (job.status === "error") throw new Error(job.error ?? "The background job failed.");
+    }
+  }
+  async function scanFolder(path: string) {
+    const target = path.trim();
+    if (!target || scanning) return;
+    setScanning(true);
+    await perform(async () => {
+      await requestJson(`${API}/api/library/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: target })
+      });
+      await refreshLibrary();
+    });
+    setScanning(false);
   }
   async function reanalyzeAsset(asset: SessionAsset) {
     if (reanalyzingId) return;
@@ -501,6 +556,8 @@ export default function App() {
             uploadOpen={uploadOpen}
             setUploadOpen={setUploadOpen}
             projectNames={projectNames}
+            scanFolder={scanFolder}
+            scanning={scanning}
           />
 
           {error && <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm">
@@ -530,6 +587,18 @@ export default function App() {
                           <Button size="sm" variant="soft" onClick={() => setRailTab("tasks")}>View tasks</Button>
                           <Button size="sm" variant="outline" onClick={() => void exportReport()}>
                             <FileDown className="size-4" /> Export report
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={batchJob !== null}
+                            onClick={() => void upgradeAnalysis()}
+                            title="Re-run analysis across this scope in the background — upgrades older analysis fields (key mode, LUFS)"
+                          >
+                            <RefreshCw className={batchJob ? "size-4 animate-spin" : "size-4"} />
+                            {batchJob
+                              ? `${batchJob.label}${batchJob.total ? ` (${batchJob.done}/${batchJob.total})` : "…"}`
+                              : "Upgrade analysis"}
                           </Button>
                         </div>
                       </div>
@@ -583,6 +652,7 @@ export default function App() {
                       )}
                     </Card>
                     {focusProject && <details className="rounded-lg border border-border bg-card p-3"><summary className="cursor-pointer text-sm font-medium">Readiness checklist · {focusProject.health.checks.filter(c => c.ok).length} of {focusProject.health.checks.length} checks</summary><ProjectHealthPanel project={focusProject} /></details>}
+                    {focusProject && <ReferenceCheck project={selectedProject} />}
                     <Inspector
                       asset={selectedAsset}
                       accent={accent}
@@ -668,7 +738,9 @@ function Header({
   uploading,
   uploadOpen,
   setUploadOpen,
-  projectNames
+  projectNames,
+  scanFolder,
+  scanning
 }: {
   theme: Theme;
   toggleTheme: () => void;
@@ -677,7 +749,10 @@ function Header({
   uploadOpen: boolean;
   setUploadOpen: (open: boolean) => void;
   projectNames: string[];
+  scanFolder: (path: string) => void;
+  scanning: boolean;
 }) {
+  const [folder, setFolder] = useState("");
   return (
     <motion.header initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -740,6 +815,28 @@ function Header({
               />
               <Button type="submit" variant="primary" disabled={uploading} className="ml-auto">
                 <Upload className="size-4" /> {uploading ? "Analyzing…" : "Analyze"}
+              </Button>
+            </form>
+            <form
+              className="mt-2 flex flex-wrap items-center gap-2 border-t border-border pt-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                scanFolder(folder);
+              }}
+            >
+              <label htmlFor="scan-folder" className="text-xs text-muted-foreground">
+                or import a folder
+              </label>
+              <input
+                id="scan-folder"
+                className="input h-9 min-w-52 flex-1"
+                placeholder="Path to a folder of bounces (files are copied, originals stay put)"
+                value={folder}
+                autoComplete="off"
+                onChange={(event) => setFolder(event.target.value)}
+              />
+              <Button type="submit" variant="soft" disabled={scanning || !folder.trim()}>
+                <FolderInput className="size-4" /> {scanning ? "Importing…" : "Scan folder"}
               </Button>
             </form>
           </Card>
@@ -1075,8 +1172,75 @@ function ViewTabs({ active, onChange }: { active: ViewId; onChange: (view: ViewI
   );
 }
 
-function ProjectHealthPanel({ project }: { project: ProjectSummary }) {
-  const health: ProjectHealth = project.health ?? { score: 0, checks: [], suggestions: [] };
+const DELTA_LABELS: Record<string, string> = {
+  rms_db: "RMS",
+  peak_db: "Peak",
+  integrated_lufs: "LUFS",
+  spectral_centroid_mean: "Brightness",
+  duration_seconds: "Length"
+};
+
+function ReferenceCheck({ project }: { project: string }) {
+  const [comparison, setComparison] = useState<ReferenceComparison | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setComparison(null);
+    setError("");
+    fetch(`/api/reference?project=${encodeURIComponent(project)}`)
+      .then(response => {
+        if (!response.ok) throw new Error(`Reference comparison failed (${response.status}).`);
+        return response.json();
+      })
+      .then(setComparison)
+      .catch(err => setError(err instanceof Error ? err.message : "Could not load the comparison."));
+  }, [project]);
+
+  return (
+    <details className="rounded-lg border border-border bg-card p-3">
+      <summary className="cursor-pointer text-sm font-medium">
+        Mix vs reference {comparison?.reference ? <span className="text-muted-foreground">· {comparison.reference.file_name}</span> : null}
+      </summary>
+      {error && <p role="alert" className="mt-2 text-sm text-danger">{error}</p>}
+      {!comparison && !error && <p role="status" className="mt-2 text-sm text-muted-foreground">Comparing…</p>}
+      {comparison && !comparison.reference && (
+        <p className="mt-2 text-sm text-muted-foreground">
+          Mark a track as <span className="text-foreground">Reference</span> in this project to see how your mixes
+          compare on loudness, tone, and length.
+        </p>
+      )}
+      {comparison?.reference && comparison.comparisons.length === 0 && (
+        <p className="mt-2 text-sm text-muted-foreground">No mixes to compare against the reference yet.</p>
+      )}
+      {comparison && comparison.comparisons.length > 0 && (
+        <div className="mt-2 space-y-2">
+          {comparison.comparisons.map(item => (
+            <div key={item.asset_id} className="rounded-md border border-border bg-background/40 p-2.5">
+              <p className="truncate text-sm font-medium">{item.file_name}</p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {Object.entries(item.deltas).map(([field, delta]) => {
+                  if (delta === null || delta === undefined) return null;
+                  const large = field === "integrated_lufs" ? Math.abs(delta) > 3 : Math.abs(delta) > 6;
+                  return (
+                    <Badge key={field} tone={large ? "amber" : "neutral"}>
+                      {DELTA_LABELS[field] ?? field} {delta > 0 ? "+" : ""}
+                      {field === "spectral_centroid_mean" ? Math.round(delta) : field === "duration_seconds" ? `${Math.round(delta)}s` : delta.toFixed(1)}
+                    </Badge>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+          <p className="text-xs text-muted-foreground">
+            Deltas are mix minus reference — negative loudness means quieter than the reference.
+          </p>
+        </div>
+      )}
+    </details>
+  );
+}
+
+function ProjectHealthPanel({ project }: { project: ProjectSummary }) {  const health: ProjectHealth = project.health ?? { score: 0, checks: [], suggestions: [] };
   const pct = Math.round(health.score * 100);
   const tone = pct >= 80 ? "text-success" : pct >= 50 ? "text-warning" : "text-danger";
   const barColor = pct >= 80 ? "bg-success" : pct >= 50 ? "bg-warning" : "bg-danger";
