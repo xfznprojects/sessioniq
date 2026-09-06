@@ -206,7 +206,53 @@ def smart_collections(assets: list[ProjectAsset]) -> dict[str, list[ProjectAsset
     }
     collections.update(_similar_bpm_collections(assets))
     collections.update(_same_key_collections(assets))
+    collections.update(_duplicate_collections(assets))
     return {name: items for name, items in collections.items() if items}
+
+
+def _duplicate_collections(assets: list[ProjectAsset]) -> dict[str, list[ProjectAsset]]:
+    """Flag possible duplicate bounces: same length and tempo grid plus a shared
+    filename token or near-identical loudness/brightness. Deliberately labelled
+    "possible" — different songs can share a duration and BPM, so the pairing
+    always needs a second signal before it is surfaced."""
+    grouped: dict[tuple[float, int], list[ProjectAsset]] = defaultdict(list)
+    for asset in assets:
+        audio = asset.audio
+        if audio and audio.duration_seconds and audio.bpm_estimate:
+            key = (round(audio.duration_seconds, 1), round(audio.bpm_estimate))
+            grouped[key].append(asset)
+
+    flagged: list[ProjectAsset] = []
+    for group in grouped.values():
+        if len(group) < 2:
+            continue
+        for index, asset in enumerate(group):
+            for other in group[index + 1 :]:
+                if not _likely_same_bounce(asset, other):
+                    continue
+                for item in (asset, other):
+                    if item not in flagged:
+                        flagged.append(item)
+    return {"Possible Duplicates": flagged} if flagged else {}
+
+
+def _likely_same_bounce(first: ProjectAsset, second: ProjectAsset) -> bool:
+    def stem_tokens(asset: ProjectAsset) -> set[str]:
+        stem = Path(asset.file_name).stem.lower()
+        return {token for token in re.split(r"[^a-z0-9]+", stem) if len(token) >= 4}
+
+    if stem_tokens(first) & stem_tokens(second):
+        return True
+    loud_a, loud_b = first.audio.rms_db, second.audio.rms_db
+    tone_a, tone_b = first.audio.spectral_centroid_mean, second.audio.spectral_centroid_mean
+    return bool(
+        loud_a is not None
+        and loud_b is not None
+        and abs(loud_a - loud_b) <= 1.5
+        and tone_a is not None
+        and tone_b is not None
+        and abs(tone_a - tone_b) <= 200.0
+    )
 
 
 def _project_tasks(
@@ -289,6 +335,119 @@ def _asset_bpm(asset: ProjectAsset) -> float | None:
     if asset.midi:
         return asset.midi.tempo_bpm
     return None
+
+
+def build_session_report(
+    scope: str,
+    assets: list[ProjectAsset],
+    summaries: list[ProjectSummary],
+    decisions: list,
+) -> str:
+    """Markdown handoff report for one project (or the whole library).
+
+    Replaces the spreadsheet glue work around a session: status, readiness,
+    open tasks, file facts, notes, and decisions in one shareable document.
+    Pure formatting — every fact comes from the same metadata the assistant
+    cites, so the report cannot drift from the library.
+    """
+    from datetime import UTC, datetime
+
+    if scope != "All Projects":
+        prefix = scope.rstrip("/") + "/"
+        assets = [
+            asset
+            for asset in assets
+            if asset.project_name == scope or asset.project_name.startswith(prefix)
+        ]
+        summaries = [
+            summary
+            for summary in summaries
+            if summary.project_name == scope or summary.project_name.startswith(prefix)
+        ]
+        decisions = [
+            decision
+            for decision in decisions
+            if decision.project_name == scope or decision.project_name.startswith(prefix)
+        ]
+
+    lines: list[str] = [
+        f"# SessionIQ report — {scope}",
+        "",
+        f"_Generated {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')} · {len(assets)} files_",
+        "",
+    ]
+
+    if not assets:
+        lines.append("_No files in scope._")
+        return "\n".join(lines)
+
+    lines.extend(["## Projects", ""])
+    lines.append("| Project | Files | Audio | MIDI | Notes | Tasks done | Readiness |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for summary in summaries:
+        done = sum(1 for task in summary.tasks if task.status == TaskStatus.DONE)
+        readiness = f"{round(summary.health.score * 100)}%"
+        lines.append(
+            f"| {summary.project_name} | {summary.asset_count} | {summary.audio_count} "
+            f"| {summary.midi_count} | {summary.note_count} "
+            f"| {done}/{len(summary.tasks)} | {readiness} |"
+        )
+
+    open_tasks = [
+        (summary.project_name, task)
+        for summary in summaries
+        for task in summary.tasks
+        if task.status != TaskStatus.DONE
+    ]
+    lines.extend(["", "## Open tasks", ""])
+    if open_tasks:
+        for project_name, task in open_tasks:
+            lines.append(f"- [ ] {task.description} — _{task.source_file}_ ({project_name})")
+    else:
+        lines.append("_None — everything captured in notes is done._")
+
+    lines.extend(["", "## Files", ""])
+    lines.append("| File | Type | Status | BPM | Key | Length | Project |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for asset in sorted(assets, key=lambda item: (item.project_name, item.file_name)):
+        bpm = _asset_bpm(asset)
+        key = _asset_key(asset)
+        duration = (
+            asset.audio.duration_seconds
+            if asset.audio
+            else asset.midi.duration_seconds
+            if asset.midi
+            else None
+        )
+        length = f"{duration:.0f}s" if duration else "—"
+        mode = f" {asset.audio.mode_estimate}" if asset.audio and asset.audio.mode_estimate else ""
+        lines.append(
+            f"| {asset.file_name} | {asset.kind.value} | {asset.status.value} "
+            f"| {f'{bpm:.0f}' if bpm else '—'} | {key + mode if key else '—'} "
+            f"| {length} | {asset.project_name} |"
+        )
+
+    noted = [
+        asset
+        for asset in assets
+        if (asset.note and asset.note.strip()) or (asset.text and asset.text.text.strip())
+    ]
+    if noted:
+        lines.extend(["", "## Notes", ""])
+        for asset in noted:
+            note = asset.note.strip() or asset.text.text.strip()  # type: ignore[union-attr]
+            indented = "\n".join(f"> {line}" for line in note.splitlines() or [""])
+            lines.append(f"**{asset.file_name}** ({asset.project_name})")
+            lines.append(indented)
+            lines.append("")
+
+    if decisions:
+        lines.extend(["## Decisions", ""])
+        for decision in sorted(decisions, key=lambda item: item.created_at, reverse=True):
+            when = decision.created_at[:10]
+            lines.append(f"- **{when}** — {decision.text} ({decision.project_name})")
+
+    return "\n".join(lines)
 
 
 def _asset_key(asset: ProjectAsset) -> str | None:

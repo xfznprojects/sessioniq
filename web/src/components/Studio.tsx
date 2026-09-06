@@ -1,16 +1,119 @@
-import { Brain, CalendarClock, FileAudio, FileText, Music4, Plus, X } from "lucide-react";
+import { BookmarkPlus, Brain, CalendarClock, FileAudio, FileText, Music4, Plus, Scale, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Badge, Button, Card, SectionTitle, Stat } from "./ui";
-import type { SessionAsset } from "../types";
+import type { Decision, SessionAsset } from "../types";
 import { requestJson } from "../lib/api";
 
 export function StudioView({ assets }: { assets: SessionAsset[] }) {
   return (
     <div className="space-y-6">
       <AIMemory />
+      <DecisionsCard />
       <SessionTimeline assets={assets} />
     </div>
+  );
+}
+
+function DecisionsCard() {
+  const [decisions, setDecisions] = useState<Decision[] | null>(null);
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    requestJson<{ decisions: Decision[] }>("/api/decisions")
+      .then(data => setDecisions(data.decisions))
+      .catch(err => setError(err instanceof Error ? err.message : "Could not load decisions."));
+  }, []);
+
+  async function add() {
+    const text = draft.trim();
+    if (!text || busy) return;
+    setBusy(true); setError("");
+    try {
+      const data = await requestJson<{ decisions: Decision[] }>("/api/decisions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+      });
+      setDecisions(current => [data.decisions[0] ?? null, ...(current ?? [])].filter(Boolean));
+      setDraft("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save the decision.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: string) {
+    try {
+      await requestJson(`/api/decisions/${encodeURIComponent(id)}`, { method: "DELETE" });
+      setDecisions(current => (current ?? []).filter(decision => decision.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete the decision.");
+    }
+  }
+
+  return (
+    <Card className="p-4">
+      <SectionTitle
+        icon={<Scale className="size-5" />}
+        title="Decisions"
+        subtitle="What you chose and when — remembered across sessions, quotable by the assistant."
+      />
+      {error && <p role="alert" className="mt-3 text-sm text-danger">{error}</p>}
+
+      <div className="mt-3 flex gap-2">
+        <input
+          className="input"
+          placeholder="Record a decision — “locked 96 BPM”, “cut the bridge”…"
+          value={draft}
+          onChange={event => setDraft(event.target.value)}
+          onKeyDown={event => {
+            if (event.key === "Enter") void add();
+          }}
+        />
+        <Button variant="soft" disabled={busy || !draft.trim()} onClick={() => void add()}>
+          <Plus className="size-4" /> Add
+        </Button>
+      </div>
+
+      {decisions === null ? (
+        <p role="status" className="mt-3 text-sm text-muted-foreground">Loading decisions…</p>
+      ) : decisions.length === 0 ? (
+        <p className="mt-3 text-sm text-muted-foreground">
+          No decisions yet. Add them here, or press “Save as decision” under an assistant answer.
+        </p>
+      ) : (
+        <ul className="mt-4 space-y-2">
+          {decisions.map(decision => (
+            <li
+              key={decision.id}
+              className="flex items-start justify-between gap-3 rounded-md border border-border bg-background/40 p-2.5"
+            >
+              <div className="min-w-0">
+                <p className="text-sm text-foreground">{decision.text}</p>
+                <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <BookmarkPlus className="size-3" />
+                  {decision.created_at.slice(0, 10)} · {decision.project_name}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <Badge tone="neutral">decision</Badge>
+                <button
+                  onClick={() => void remove(decision.id)}
+                  aria-label={`Delete decision from ${decision.created_at.slice(0, 10)}`}
+                  className="text-muted-foreground transition-colors hover:text-danger"
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
 

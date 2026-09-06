@@ -21,6 +21,7 @@ export type AudioMetadata = {
   codec?: string | null;
   bitrate?: number | null;
   key_estimate?: string | null;
+  mode_estimate?: string | null;
 };
 
 export type MidiMetadata = {
@@ -40,7 +41,7 @@ export type MidiMetadata = {
 export type SessionAsset = {
   id: string;
   file_name: string;
-  kind: "audio" | "midi" | "note" | "reference" | "export";
+  kind: "audio" | "midi" | "note" | "image" | "reference" | "export";
   display_type: string;
   project_name: string;
   stored_path?: string | null;
@@ -54,7 +55,11 @@ export type SessionAsset = {
   note: string;
   bpm?: number | null;
   key?: string | null;
+  mode?: string | null;
   duration?: number | null;
+  /** Derived from the stored energy series: time of the loudest moment. */
+  energy_peak_seconds?: number | null;
+  first_beat_seconds?: number | null;
   audio?: AudioMetadata;
   midi?: MidiMetadata;
   text?: { text: string; word_count: number; action_items: string[] };
@@ -106,9 +111,77 @@ export type QualityReport = {
   temperature: number | null;
   knowledge_source: string;
   token_usage: TokenUsage;
+  tool_calls?: { name: string; arguments: Record<string, unknown> }[] | null;
   retrieval_ms: number;
   processing_ms: number;
   generated_at: string;
+};
+
+export type Citation = {
+  asset_id?: string | null;
+  file_name: string;
+  evidence: string;
+};
+
+export type ChatResponse = {
+  answer: { answer: string; citations: Citation[]; confidence: "low" | "medium" | "high" };
+  sources: (SessionAsset & { score: number; via: "retrieval" | "tool" })[];
+  validation: string[];
+  quality: QualityReport;
+  standalone_question?: string | null;
+  rewrite_method?: string | null;
+  query_id?: string | null;
+};
+
+export type ChatMessage = {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  result?: ChatResponse;
+  pending?: boolean;
+  /** Live status line while the answer streams ("Querying library…"). */
+  status?: string;
+};
+
+export type Feedback = "up" | "down";
+
+export type QueryLogEntry = {
+  id: string;
+  ts: string;
+  question: string;
+  project_name?: string | null;
+  standalone_question?: string | null;
+  rewrite_method?: string | null;
+  engine?: string;
+  mode?: string;
+  model?: string;
+  confidence?: string;
+  grounded?: boolean;
+  sources_retrieved?: number;
+  files_cited?: number;
+  tool_calls?: { name: string }[] | null;
+  processing_ms?: number;
+  feedback?: Feedback | null;
+};
+
+export type QueryLogResponse = {
+  entries: QueryLogEntry[];
+  stats: { total: number; unanswered: number; feedback_up: number; feedback_down: number };
+};
+
+export type AiStatus = {
+  answering: { mode: string; model: string; endpoint: string };
+  vector_search: boolean;
+  transcription: { available: boolean; model: string; hint?: string };
+  hints: string[];
+};
+
+export type Decision = {
+  id: string;
+  text: string;
+  project_name: string;
+  source_asset_id?: string | null;
+  created_at: string;
 };
 
 export type PipelineStage = {

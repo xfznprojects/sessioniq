@@ -13,7 +13,18 @@ function readResume(): Resume {
   catch { return {}; }
 }
 
-export function Player({ assets, selected }: { assets: SessionAsset[]; selected?: SessionAsset }) {
+/** Imperative jump request: play this track from a time position. */
+export type PlayerSeek = { id: string; time: number; nonce: number };
+
+export function Player({
+  assets,
+  selected,
+  seek
+}: {
+  assets: SessionAsset[];
+  selected?: SessionAsset;
+  seek?: PlayerSeek | null;
+}) {
   const audio = useRef<HTMLAudioElement>(null);
   const [resume] = useState(readResume);
   const [trackId, setTrackId] = useState<string | undefined>(resume.id);
@@ -26,6 +37,9 @@ export function Player({ assets, selected }: { assets: SessionAsset[]; selected?
   const loadedTrack = useRef<string | undefined>(undefined);
   const resumed = useRef(false);
   const previousSelection = useRef<string | undefined>(undefined);
+  // A seek for a track that is still loading; applied once metadata is ready.
+  const pendingSeek = useRef<PlayerSeek | null>(null);
+  const appliedSeek = useRef(0);
   const tracks = assets.filter(a => a.display_type === "Audio" && a.media_url);
   const track = tracks.find(a => a.id === trackId) ?? tracks[0];
 
@@ -40,6 +54,28 @@ export function Player({ assets, selected }: { assets: SessionAsset[]; selected?
     setPlaying(false); setTime(0); setDuration(0); setError("");
     if (audio.current) audio.current.volume = volume;
   }, [track?.id, track?.media_url]);
+
+  useEffect(() => {
+    if (!seek || seek.nonce === appliedSeek.current) return;
+    appliedSeek.current = seek.nonce;
+    pendingSeek.current = seek;
+    setTrackId(seek.id);
+    // Track already loaded: jump immediately.
+    if (loadedTrack.current === seek.id && audio.current && audio.current.duration) {
+      audio.current.currentTime = Math.max(0, Math.min(seek.time, audio.current.duration));
+      void audio.current.play().catch(() => setError("Could not play this file."));
+      pendingSeek.current = null;
+    }
+  }, [seek]);
+
+  function applyPendingSeek() {
+    const request = pendingSeek.current;
+    const element = audio.current;
+    if (!request || !element) return;
+    pendingSeek.current = null;
+    element.currentTime = Math.max(0, Math.min(request.time, element.duration || request.time));
+    void element.play().catch(() => setError("Could not play this file."));
+  }
 
   function remember() {
     if (!loadedTrack.current || !audio.current) return;
@@ -84,6 +120,7 @@ export function Player({ assets, selected }: { assets: SessionAsset[]; selected?
             element.currentTime = Math.max(0, Math.min(resume.time!, element.duration || 0));
           }
           resumed.current = true;
+          applyPendingSeek();
         }}
         onTimeUpdate={() => {
           setTime(audio.current?.currentTime ?? 0);

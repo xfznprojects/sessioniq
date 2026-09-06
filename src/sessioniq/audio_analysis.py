@@ -38,6 +38,7 @@ def analyze_audio(path: str | Path) -> AudioMetadata:
         centroid_series = _spectral_centroid_series(librosa, y, sr)
         beats = _beat_positions(librosa, y, sr)
         key = _estimate_key(librosa, y, sr)
+        mode = _estimate_mode(librosa, y, sr, key)
         return AudioMetadata(
             duration_seconds=duration,
             bpm_estimate=bpm,
@@ -52,6 +53,7 @@ def analyze_audio(path: str | Path) -> AudioMetadata:
             beat_positions=beats,
             codec=path.suffix.lower().removeprefix(".").upper() or None,
             key_estimate=key,
+            mode_estimate=mode,
         )
     except Exception as exc:
         if path.suffix.lower() in WAV_EXTENSIONS:
@@ -178,6 +180,37 @@ def _estimate_key(librosa_module, samples: np.ndarray, sample_rate: int) -> str 
         chroma = librosa_module.feature.chroma_stft(y=samples, sr=sample_rate)
         pitch_class = int(np.argmax(np.mean(chroma, axis=1)))
         return ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")[pitch_class]
+    except Exception:
+        return None
+
+
+# Krumhansl-Kessler tonic profiles, indexed from the detected root.
+_KK_MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+_KK_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+_NOTE_ORDER = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+
+def _estimate_mode(
+    librosa_module,
+    samples: np.ndarray,
+    sample_rate: int,
+    key_estimate: str | None,
+) -> str | None:
+    """Major/minor by correlating chroma against tonic profiles rotated to the
+    detected root. Pure numpy over chroma SessionIQ already computes."""
+    if key_estimate is None or key_estimate not in _NOTE_ORDER or not samples.size:
+        return None
+    try:
+        chroma = librosa_module.feature.chroma_stft(y=samples, sr=sample_rate)
+        if chroma.size == 0:
+            return None
+        root = _NOTE_ORDER.index(key_estimate)
+        rotated = np.roll(np.mean(chroma, axis=1), -root)
+        major_score = float(np.corrcoef(rotated, _KK_MAJOR)[0, 1])
+        minor_score = float(np.corrcoef(rotated, _KK_MINOR)[0, 1])
+        if not (np.isfinite(major_score) and np.isfinite(minor_score)):
+            return None
+        return "major" if major_score >= minor_score else "minor"
     except Exception:
         return None
 

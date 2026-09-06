@@ -1,16 +1,21 @@
 import { motion } from "framer-motion";
 import {
+  CircleHelp,
   GitCompareArrows,
   Lightbulb,
+  MessageSquareQuote,
   Search,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
   Wand2
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { Badge, Button, Card, SectionTitle } from "./ui";
+import { Badge, Button, Card, SectionTitle, Stat } from "./ui";
+import { requestJson } from "../lib/api";
 import { cn, EASE_OUT } from "../lib/utils";
-import type { SessionAsset } from "../types";
+import type { Feedback, QueryLogEntry, QueryLogResponse, SessionAsset } from "../types";
 
 const stagger = (index: number) => ({
   initial: { opacity: 0, y: 8 },
@@ -24,6 +29,8 @@ const CREATIVE_INSIGHTS = [
   "Which songs share a similar atmosphere?",
   "Which songs could fit together as an EP?",
   "Which project should I finish next?",
+  "What did we decide recently?",
+  "Which files might be duplicates?",
   "What tempo and key range does my library cover?"
 ];
 
@@ -49,7 +56,117 @@ export function InsightsView({
       <CreativeInsights onRunInsight={onRunInsight} />
       <SemanticSearch scope={scope} />
       <SimilarityEngine assets={assets} />
+      <QueryLogCard />
     </div>
+  );
+}
+
+function QueryLogCard() {
+  const [data, setData] = useState<QueryLogResponse | null>(null);
+  const [error, setError] = useState("");
+  const [unansweredOnly, setUnansweredOnly] = useState(false);
+
+  const load = useCallback((unanswered: boolean) => {
+    fetch(`/api/queries?limit=20${unanswered ? "&unanswered=true" : ""}`)
+      .then(response => response.json())
+      .then(setData)
+      .catch(() => setError("Could not load the query log."));
+  }, []);
+
+  useEffect(() => { load(unansweredOnly); }, [load, unansweredOnly]);
+
+  async function sendFeedback(entry: QueryLogEntry, feedback: Feedback) {
+    const next = entry.feedback === feedback ? null : feedback;
+    try {
+      await requestJson(`/api/queries/${encodeURIComponent(entry.id)}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ feedback: next })
+      });
+      load(unansweredOnly);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save feedback.");
+    }
+  }
+
+  const stats = data?.stats;
+  return (
+    <Card className="p-4">
+      <SectionTitle
+        icon={<MessageSquareQuote className="size-5" />}
+        title="Query Log"
+        subtitle="Every question with its quality report and your feedback — the backlog for making the library easier to answer."
+        actions={
+          <Button
+            size="sm"
+            variant={unansweredOnly ? "soft" : "ghost"}
+            onClick={() => setUnansweredOnly(value => !value)}
+            aria-pressed={unansweredOnly}
+          >
+            <CircleHelp className="size-3.5" /> Unanswered only
+          </Button>
+        }
+      />
+      {error && <p role="alert" className="mt-3 text-sm text-danger">{error}</p>}
+      {stats && (
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Stat label="Questions" value={stats.total} />
+          <Stat label="Unanswered" value={stats.unanswered} />
+          <Stat label="Helpful" value={stats.feedback_up} />
+          <Stat label="Not helpful" value={stats.feedback_down} />
+        </div>
+      )}
+      {data && data.entries.length === 0 && (
+        <p className="mt-3 text-sm text-muted-foreground">
+          {unansweredOnly
+            ? "Every question so far was grounded — nothing on the backlog."
+            : "Ask the assistant something; every answer lands here with its provenance."}
+        </p>
+      )}
+      <div className="mt-3 space-y-2">
+        {data?.entries.map(entry => {
+          const unanswered =
+            !entry.sources_retrieved || (entry.confidence === "low" && !entry.files_cited);
+          return (
+            <div
+              key={entry.id}
+              className={cn(
+                "flex items-start justify-between gap-3 rounded-md border p-2.5",
+                unanswered ? "border-warning/40 bg-warning/5" : "border-border bg-background/40"
+              )}
+            >
+              <div className="min-w-0">
+                <p className="truncate text-sm text-foreground" title={entry.question}>{entry.question}</p>
+                <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                  <span>{entry.ts?.slice(0, 10)}</span>
+                  <span>· {entry.model ?? entry.engine}</span>
+                  {entry.confidence && <span>· {entry.confidence} confidence</span>}
+                  {entry.files_cited != null && <span>· {entry.files_cited} cited</span>}
+                  {entry.tool_calls?.length ? <span>· {entry.tool_calls.length} tool call{entry.tool_calls.length === 1 ? "" : "s"}</span> : null}
+                  {unanswered && <span className="font-medium text-warning">· not grounded</span>}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <Button
+                  size="icon" variant="ghost" aria-label="Mark helpful"
+                  className={cn("size-7", entry.feedback === "up" ? "text-success" : "text-muted-foreground")}
+                  onClick={() => void sendFeedback(entry, "up")}
+                >
+                  <ThumbsUp className="size-3.5" />
+                </Button>
+                <Button
+                  size="icon" variant="ghost" aria-label="Mark unhelpful"
+                  className={cn("size-7", entry.feedback === "down" ? "text-danger" : "text-muted-foreground")}
+                  onClick={() => void sendFeedback(entry, "down")}
+                >
+                  <ThumbsDown className="size-3.5" />
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
   );
 }
 

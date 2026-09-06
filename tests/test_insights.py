@@ -53,3 +53,41 @@ def test_similarity_handles_missing_features_gracefully():
     )
     # No overlapping numeric features -> excluded rather than crashing.
     assert similar_assets(target, [bare]) == []
+
+
+def test_tempo_similarity_treats_double_time_as_same_groove():
+    from sessioniq.insights import tempo_similarity
+
+    assert tempo_similarity(90.0, 180.0) == 1.0
+    assert tempo_similarity(180.0, 90.0) == 1.0
+    assert tempo_similarity(90.0, 175.0) > 0.7  # near half-time
+    # Genuinely different tempi stay dissimilar.
+    assert tempo_similarity(90.0, 150.0) < 0.05
+
+
+def test_similarity_scores_half_time_tracks_as_close():
+    target = _audio("half", 90, 3000, -12, "C")
+    double = _audio("double", 180, 3050, -12, "C")
+
+    dims = similar_assets(target, [double])[0]["dimensions"]
+
+    assert dims["tempo"] > 0.9
+
+
+def test_key_compatibility_relative_minor_and_neighbors():
+    from sessioniq.insights import key_compatibility
+
+    assert key_compatibility("C", "major", "A", "minor") == 0.95  # relative minor
+    assert key_compatibility("C", "major", "C", "major") == 1.0
+    assert key_compatibility("C", None, "G", None) == 0.85  # perfect fifth
+    assert key_compatibility("C", None, "F#", None) == 0.0
+
+
+def test_similarity_reports_compatible_key_highlight():
+    target = _audio("root", 120, 2500, -12, "C")
+    neighbor = _audio("fifth", 121, 2510, -12, "G")
+
+    match = similar_assets(target, [neighbor])[0]
+
+    assert "compatible key" in match["highlights"]
+    assert "same key" not in match["highlights"]
