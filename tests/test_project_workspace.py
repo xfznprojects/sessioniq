@@ -3,7 +3,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from sessioniq.models import AssetKind, NoteMetadata, ProjectAsset, TaskStatus
+from sessioniq.models import (
+    AssetKind,
+    AudioMetadata,
+    NoteMetadata,
+    ProjectAsset,
+    TaskStatus,
+)
 from sessioniq.project_workspace import (
     UPLOAD_ROOT,
     move_stored_file,
@@ -113,3 +119,63 @@ def test_summarize_projects_counts_assets_and_progress():
     assert len(summary.tasks) == 2
     assert summary.tasks[0].status == TaskStatus.DONE
     assert summary.progress == 0.5
+
+
+def test_duplicate_collection_flags_same_bounce_only():
+    from sessioniq.project_workspace import smart_collections
+
+    def dup(name, rms=-12.0):
+        return ProjectAsset(
+            id=name,
+            file_name=f"{name}.wav",
+            kind=AssetKind.AUDIO,
+            project_name="Dupes",
+            audio=AudioMetadata(
+                duration_seconds=180.0,
+                bpm_estimate=124.0,
+                rms_amplitude=0.2,
+                rms_db=rms,
+                spectral_centroid_mean=2500.0,
+            ),
+        )
+
+    rough = dup("afterglow rough mix")
+    final = dup("afterglow final master")
+    stranger = ProjectAsset(
+        id="stranger",
+        file_name="stranger.wav",
+        kind=AssetKind.AUDIO,
+        project_name="Dupes",
+        audio=AudioMetadata(
+            duration_seconds=180.0,  # Same grid, different song.
+            bpm_estimate=124.0,
+            rms_amplitude=0.2,
+            rms_db=-20.0,
+            spectral_centroid_mean=900.0,
+        ),
+    )
+
+    collections = smart_collections([rough, final, stranger])
+
+    flagged = collections.get("Possible Duplicates", [])
+    names = {asset.file_name for asset in flagged}
+    assert names == {"afterglow rough mix.wav", "afterglow final master.wav"}
+
+
+def test_no_duplicates_collection_for_distinct_files():
+    from sessioniq.project_workspace import smart_collections
+
+    one = ProjectAsset(
+        id="one",
+        file_name="one.wav",
+        kind=AssetKind.AUDIO,
+        audio=AudioMetadata(duration_seconds=60.0, bpm_estimate=90.0),
+    )
+    two = ProjectAsset(
+        id="two",
+        file_name="two.wav",
+        kind=AssetKind.AUDIO,
+        audio=AudioMetadata(duration_seconds=61.0, bpm_estimate=128.0),
+    )
+
+    assert "Possible Duplicates" not in smart_collections([one, two])

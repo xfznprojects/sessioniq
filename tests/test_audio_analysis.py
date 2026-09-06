@@ -71,3 +71,32 @@ def test_estimate_bpm_falls_back_to_librosa_beat_tempo():
     samples = np.ones(128, dtype=np.float32)
 
     assert _estimate_bpm(FakeLibrosa(), samples, 44_100) == 123.0
+
+
+def _triad_wav(path, sample_rate: int, frequencies: list[tuple[float, float]]):
+    frames = []
+    for index in range(sample_rate * 2):  # 2 seconds
+        value = sum(
+            amplitude * math.sin(2 * math.pi * freq * index / sample_rate)
+            for freq, amplitude in frequencies
+        )
+        frames.append(struct.pack("<h", int(value / len(frequencies) * 32767)))
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"".join(frames))
+
+
+def test_mode_estimate_detects_major_and_minor(tmp_path):
+    major = tmp_path / "major_triad.wav"
+    _triad_wav(major, 8_000, [(261.63, 0.6), (329.63, 0.35), (392.0, 0.35)])
+    metadata = analyze_audio(major)
+    assert metadata.key_estimate == "C"
+    assert metadata.mode_estimate == "major"
+
+    minor = tmp_path / "minor_triad.wav"
+    _triad_wav(minor, 8_000, [(220.0, 0.6), (261.63, 0.35), (329.63, 0.35)])
+    minor_metadata = analyze_audio(minor)
+    assert minor_metadata.key_estimate == "A"
+    assert minor_metadata.mode_estimate == "minor"

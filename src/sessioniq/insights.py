@@ -5,6 +5,7 @@ store, when present, sharpens retrieval separately in the retriever.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 
 from sessioniq.models import AssetKind, ProjectAsset
@@ -19,6 +20,77 @@ DIMENSION_SCALE: dict[str, float] = {
     "duration": 240.0,  # seconds
 }
 NUMERIC_DIMENSIONS = tuple(DIMENSION_SCALE)
+
+# Tempos at these ratios share a grid (double-time, half-time, triplets), so
+# 90 vs 180 BPM is the same groove family, not zero similarity.
+METRIC_RATIOS = (1 / 3, 0.5, 2.0, 3.0)
+# Deviation tolerated around an exact multiple: a tight window, because being
+# "near double-time" is a much weaker claim than being near the same tempo.
+MULTIPLE_WINDOW_BPM = 12.0
+
+
+def tempo_similarity(bpm_a: float, bpm_b: float) -> float:
+    """Similarity by tempo, folding metrical multiples onto one grid.
+
+    Direct comparison uses the full 60 BPM scale; near-exact multiples
+    (double-time, half-time, triplets) score high so a 90 BPM groove can
+    match its 180 BPM bounce.
+    """
+    best = max(0.0, 1.0 - abs(bpm_a - bpm_b) / DIMENSION_SCALE["tempo"])
+    for ratio in METRIC_RATIOS:
+        scaled = bpm_b * ratio
+        candidate = max(0.0, 1.0 - abs(bpm_a - scaled) / MULTIPLE_WINDOW_BPM)
+        best = max(best, candidate)
+    return best
+
+PITCH_CLASSES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+_FLAT_TO_SHARP = {"DB": "C#", "EB": "D#", "GB": "F#", "AB": "G#", "BB": "A#"}
+# Compatibility by distance on the circle of fifths (Camelot-style): neighbors
+# (perfect fourth/fifth) and the relative major/minor mix well; distant keys
+# do not. Same-letter entries here mean "identical position on the wheel".
+_SAME_MODE_COMPAT = {0: 1.0, 1: 0.85, 2: 0.6}
+_CROSS_MODE_COMPAT = {0: 0.95, 1: 0.75}
+
+
+def _parse_key(key: str | None) -> int | None:
+    """Pitch class (0-11) from analyzer output like 'C', 'F#', or 'Bb'."""
+    if not key:
+        return None
+    tokens = re.findall(r"[A-G][#b]?", key.strip().upper())
+    if not tokens:
+        return None
+    name = _FLAT_TO_SHARP.get(tokens[0], tokens[0])
+    return PITCH_CLASSES.index(name) if name in PITCH_CLASSES else None
+
+
+def _circle_distance(a: int, b: int) -> int:
+    return min(abs(a - b), 12 - abs(a - b))
+
+
+def key_compatibility(
+    key_a: str | None,
+    mode_a: str | None,
+    key_b: str | None,
+    mode_b: str | None,
+) -> float | None:
+    """Harmonic compatibility in [0, 1]: 1.0 is the same key, ~0.85 a fourth/fifth
+    or same wheel position, 0.95 the relative major/minor. None when a key is
+    missing. Without mode estimates both keys are compared as majors, so older
+    libraries still get graded compatibility instead of a same/different bit.
+    """
+    pitch_a, pitch_b = _parse_key(key_a), _parse_key(key_b)
+    if pitch_a is None or pitch_b is None:
+        return None
+
+    def fifths(pitch: int, mode: str | None) -> int:
+        # Minor keys map to their relative major's slot on the wheel.
+        root = pitch + 3 if mode == "minor" else pitch
+        return (root * 7) % 12
+
+    distance = _circle_distance(fifths(pitch_a, mode_a), fifths(pitch_b, mode_b))
+    if mode_a and mode_b and mode_a != mode_b:
+        return _CROSS_MODE_COMPAT.get(distance, 0.0)
+    return _SAME_MODE_COMPAT.get(distance, 0.0)
 
 
 def _numeric_features(asset: ProjectAsset) -> dict[str, float]:
@@ -48,6 +120,10 @@ def _asset_key(asset: ProjectAsset) -> str | None:
     return None
 
 
+def _asset_mode(asset: ProjectAsset) -> str | None:
+    return asset.audio.mode_estimate if asset.audio else None
+
+
 def similar_assets(
     target: ProjectAsset,
     others: list[ProjectAsset],
@@ -63,12 +139,21 @@ def similar_assets(
         dimensions: dict[str, float] = {}
         for dimension in NUMERIC_DIMENSIONS:
             if dimension in target_features and dimension in features:
-                diff = abs(target_features[dimension] - features[dimension])
-                dimensions[dimension] = max(0.0, 1.0 - diff / DIMENSION_SCALE[dimension])
+                if dimension == "tempo":
+                    dimensions[dimension] = tempo_similarity(
+                        target_features[dimension], features[dimension]
+                    )
+                else:
+                    diff = abs(target_features[dimension] - features[dimension])
+                    dimensions[dimension] = max(0.0, 1.0 - diff / DIMENSION_SCALE[dimension])
 
         asset_key = _asset_key(asset)
         if target_key and asset_key:
-            dimensions["key"] = 1.0 if target_key == asset_key else 0.0
+            compatibility = key_compatibility(
+                target_key, _asset_mode(target), asset_key, _asset_mode(asset)
+            )
+            if compatibility is not None:
+                dimensions["key"] = compatibility
 
         if not dimensions:
             continue
@@ -158,9 +243,17 @@ def _highlights(dimensions: dict[str, float]) -> list[str]:
         "duration": "similar length",
         "key": "same key",
     }
+    # "same key" is reserved for an exact match; graded compatibility gets its
+    # own label so a fifth-up neighbor never reads as the same key.
     strong = sorted(
-        (item for item in dimensions.items() if item[1] >= 0.8),
+        (item for item in dimensions.items() if item[1] >= 0.8 and item[0] != "key"),
         key=lambda item: item[1],
         reverse=True,
     )
-    return [phrases[name] for name, _ in strong if name in phrases]
+    highlights = [phrases[name] for name, _ in strong if name in phrases]
+    key_score = dimensions.get("key", 0.0)
+    if key_score >= 0.99:
+        highlights.append("same key")
+    elif key_score >= 0.55:
+        highlights.append("compatible key")
+    return highlights

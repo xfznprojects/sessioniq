@@ -12,7 +12,7 @@ and answers questions about your work **with citations to the exact files it use
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-38BDF8?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
-[![Tests](https://img.shields.io/badge/tests-81_passing-2ea44f)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-132_passing-2ea44f)](#-testing)
 [![Ruff](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)](https://docs.astral.sh/ruff/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -91,12 +91,18 @@ configured, and semantic search degrades gracefully to lexical when embeddings a
 | | |
 | --- | --- |
 | 🗂️ **Albums & songs** | Nested folder tree — create an album, drop songs inside it, rename (files move on disk), drag files between projects, right-click to delete. |
-| 🎚️ **Real analysis** | librosa (BPM, key, peak/RMS dB, brightness, beats) · pretty_midi (notes, pitch range, tempo) · note/task extraction. |
-| 🤖 **Grounded assistant** | Answers cite the files used. Runs a **local Ollama model**, **OpenAI**, or a deterministic offline engine — automatically. |
-| 🔎 **Semantic search & similarity** | Find files by meaning ("tracks that still need mastering") and compare tracks — *"Afterglow is 66% similar to Midnight Drive"* — with a per-dimension breakdown. |
-| 📊 **Quality Report** | Per-answer confidence, grounding, hallucination risk, provenance (model / prompt version / temperature / latency / tokens) and automated citation/numeric checks with explicit limitations. |
+| 🎚️ **Real analysis** | librosa (BPM, key + major/minor mode, peak/RMS dB, brightness, beats) · pretty_midi (notes, pitch range, tempo) · note/task extraction. |
+| 🤖 **Grounded assistant** | Answers cite the files used. **Multi-turn**: ask "what about its key?" and follow-ups resolve against the previous answer. **Streams live** — interpretation, tool calls, and answer text arrive as they happen. Runs a **local Ollama model**, **OpenAI**, or a deterministic offline engine — automatically. |
+| 🔧 **Tool-backed answers** | With an LLM configured, the assistant queries your metadata through tools (filter, aggregate, superlatives, similarity) so counts and comparisons are exact — even over 1000+ files. |
+| 🔎 **Semantic search & similarity** | Find files by meaning ("tracks that still need mastering") and compare tracks — *"Afterglow is 66% similar to Midnight Drive"* — with a per-dimension breakdown. Tempo folds double/half-time, and key compatibility follows the circle of fifths (relative minors, fourths/fifths). |
+| 📊 **Quality Report** | Per-answer confidence, grounding, hallucination risk, provenance (model / prompt version / temperature / latency / tokens / tools used) and automated citation/numeric checks with explicit limitations. Recorded decisions and note text count as grounded claims. |
+| 🧾 **Query log & feedback** | Every question is logged with its quality report; thumbs up/down plus an "unanswered questions" backlog show where the library needs more (or better) sources. |
 | 🩺 **Project Health** | Completeness score + checklist (audio, notes, reference, master, tasks) + actionable suggestions. |
-| 🧠 **AI Memory** | A producer "creative fingerprint" derived from your library plus editable preferences the assistant remembers across sessions. |
+| 🧠 **AI Memory** | A producer "creative fingerprint" derived from your library, editable preferences, and a **decision log** — record what you chose ("locked 96 BPM") and the assistant can quote it back with citations. |
+| 🎤 **Voice memo transcription** | Optional local Whisper (`pip install -e ".[voice]"`) turns recordings into notes with extracted tasks. |
+| 📄 **Session reports** | One-click Markdown handoff report per project (or the whole library): status, readiness, tasks, files, notes, decisions. |
+| 🕵️ **Duplicate detection** | A "Possible Duplicates" smart collection flags same-length, same-tempo bounces before they multiply. |
+| ⏱️ **Time-linked playback** | "Jump to loudest moment" and "play from first beat" seek the bottom player using the stored analysis series. |
 | 🏷️ **Custom tags** | Manual, color-coded tag pills alongside AI-suggested ones. |
 | 🎨 **Design** | Token-driven design system (light/dark), tasteful motion, and category color-coding for fast scanning. |
 
@@ -214,9 +220,12 @@ sessioniq/
 │   ├── audio_analysis.py   # librosa analysis (+ WAV fallback)
 │   ├── midi_analysis.py    # pretty_midi (+ mido fallback)
 │   ├── retrieval.py        # hybrid lexical + ChromaDB vector retriever
+│   ├── conversation.py     # follow-up questions → standalone questions
+│   ├── tools.py            # metadata query tools for agentic answers
 │   ├── assistant.py        # grounded answers + quality metadata (Ollama/OpenAI/rules)
 │   ├── validation.py       # citation & grounding checks
 │   ├── insights.py         # similarity engine + producer profile
+│   ├── transcription.py    # optional local Whisper voice-memo transcription
 │   ├── plugins.py          # analyzer registry
 │   └── project_workspace.py# projects, smart collections, health, file ops
 ├── web/src/                # React + TypeScript dashboard
@@ -229,7 +238,7 @@ sessioniq/
 ## 🧪 Testing
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest        # 81 passing
+.\.venv\Scripts\python.exe -m pytest        # 132 passing
 .\.venv\Scripts\python.exe -m ruff check .
 cd web; npm test                            # frontend scope regressions
 npm run build                               # tsc + vite build
@@ -238,9 +247,36 @@ npm run build                               # tsc + vite build
 ## Workspace and safety update
 
 - Smart Collections now filter the file list; project cards open the selected workspace.
+  A "Possible Duplicates" collection flags same-length, same-tempo bounces that also
+  share a filename token or near-identical loudness/brightness — always a hint, never
+  an auto-delete.
 - Files appear near the top, with compact project navigation and expandable readiness/analysis.
 - The bottom player supports play/pause, seeking, volume, previous/next track, and local resume.
   Space toggles playback outside input controls; Alt+Left/Right switches tracks.
+  The inspector can jump the player to the loudest moment or the first detected beat.
+- The assistant keeps a conversation (persisted in the browser across reloads): follow-up
+  questions ("what about its key?") are rewritten into standalone questions (LLM
+  condensation when a model is configured, a deterministic file-name heuristic offline)
+  before retrieval. Answers stream over server-sent events — interpretation, tool calls,
+  and text arrive as they happen — and each answer shows how the follow-up was interpreted.
+  "Save as decision" files an answer into the decision log.
+- With an LLM configured, answers can call metadata tools (search, filter, compute
+  min/max/avg/count, asset details, similarity, project list) for exact aggregate
+  answers; every asset a tool touches is validated as a citable source. The offline
+  rules engine is unchanged.
+- Recorded decisions live in Studio → Decisions, persist with the library index, and
+  are quotable by the assistant (numbers quoted from decisions and note text pass the
+  grounding checks). "Export report" downloads a Markdown session report for the
+  selected project or the whole library.
+- Every question lands in a query log (Insights → Query Log) with its provenance and
+  thumbs up/down; the "unanswered only" filter shows the backlog of questions the
+  library could not ground.
+- "Re-analyze" on any file re-runs analysis on the stored file while keeping its id,
+  status, tags, and notes — the upgrade path for libraries analyzed before newer
+  fields (key mode, richer search text) existed.
+- Voice memo transcription is an optional local extra
+  (`pip install -e ".[voice]"`, model via `SESSIONIQ_WHISPER_MODEL`): transcribe an
+  audio file into a note asset with extracted tasks.
 - Note drafts are retained in this browser. Save notes (or Ctrl/Cmd+Enter) to update the library,
   tasks, and assistant context. Drafts and player resume data are local to the browser origin.
 - Completed tasks keep their status after renaming/moving projects. Existing task IDs are migrated

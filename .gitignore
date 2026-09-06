@@ -13,3 +13,6 @@ web/node_modules/
 web/dist/
 *.pyc
 *.egg-info/
+
+# Internal working notes — never publish local paths or machine details.
+docs/HANDOFF*

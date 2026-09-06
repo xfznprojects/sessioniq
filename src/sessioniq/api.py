@@ -3,37 +3,58 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
+import queue
+import re
 import shutil
+import threading
 import time
 from collections import defaultdict
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 from threading import RLock
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from sessioniq.assistant import PROMPT_VERSION, GroundedAssistant, llm_status
+from sessioniq.conversation import (
+    condense_with_llm,
+    deterministic_standalone,
+    looks_like_followup,
+)
 from sessioniq.ingestion import ingest_file, supported_extensions, supported_upload_types
 from sessioniq.insights import producer_profile, similar_assets
-from sessioniq.models import AssetKind, AssetTag, FileStatus, ProjectAsset, TaskStatus
-from sessioniq.persistence import mark_known_good, save_index
+from sessioniq.models import (
+    AssetKind,
+    AssetTag,
+    Decision,
+    FileStatus,
+    ProjectAsset,
+    RetrievedSource,
+    TaskStatus,
+)
+from sessioniq.persistence import atomic_write, mark_known_good, save_index
 from sessioniq.plugins import plugin_registry
 from sessioniq.project_workspace import (
     UPLOAD_ROOT,
+    build_session_report,
     move_stored_file,
     safe_upload_path,
     smart_collections,
     summarize_projects,
 )
 from sessioniq.retrieval import HybridRetriever
+from sessioniq.tools import LibraryToolbox
+from sessioniq.transcription import transcribe_audio, transcription_status
 from sessioniq.validation import validate_grounded_answer
 
 load_dotenv()
@@ -55,8 +76,15 @@ ASSETS: list[ProjectAsset] = []
 TASK_STATUSES: dict[str, str] = {}
 PROJECT_ORDER: list[str] = []
 PREFERENCES: list[str] = []
+DECISIONS: list[Decision] = []
 LAST_ANSWER_SOURCES: list = []
+LAST_ANSWER_DECISIONS: list[Decision] = []
 LAST_ANSWER = None
+# Answer log for the LLMOps loop: every question with its quality report and
+# the user's thumbs up/down. Capped in memory; JSON on disk next to the index.
+QUERY_LOG: list[dict] = []
+QUERY_LOG_MAX = 500
+QUERY_LOG_PATH = UPLOAD_ROOT.parent / "query-log.json"
 RETRIEVER = HybridRetriever(persist_directory=UPLOAD_ROOT.parent / "chroma")
 STATE_LOCK = RLock()
 FILE_MOVES: list[tuple[Path, Path]] = []
@@ -83,8 +111,9 @@ def _asset_field_snapshot(asset: ProjectAsset) -> dict:
     """Flat snapshot of the fields endpoints may mutate in place.
 
     Nested analysis models (audio/midi/text) are written once at ingest and
-    never mutated afterwards, so deep-copying them for every mutation — the
-    previous whole-library snapshot — was pure overhead at scale.
+    only swapped whole (re-analysis), so reference snapshots are enough and
+    deep-copying them for every mutation — the previous whole-library
+    snapshot — was pure overhead at scale.
     """
     return {
         "status": asset.status,
@@ -93,6 +122,11 @@ def _asset_field_snapshot(asset: ProjectAsset) -> dict:
         "stored_path": asset.stored_path,
         "project_name": asset.project_name,
         "file_name": asset.file_name,
+        "kind": asset.kind,
+        "audio": asset.audio,
+        "midi": asset.midi,
+        "text": asset.text,
+        "last_analyzed": asset.last_analyzed,
     }
 
 
@@ -108,6 +142,11 @@ def _restore_assets(original_assets: list[ProjectAsset]) -> None:
             asset.stored_path = undo["stored_path"]
             asset.project_name = undo["project_name"]
             asset.file_name = undo["file_name"]
+            asset.kind = undo["kind"]
+            asset.audio = undo["audio"]
+            asset.midi = undo["midi"]
+            asset.text = undo["text"]
+            asset.last_analyzed = undo["last_analyzed"]
 
 
 def mutation(function):
@@ -132,6 +171,7 @@ def mutation(function):
             original_statuses = dict(TASK_STATUSES)
             original_order = list(PROJECT_ORDER)
             original_preferences = list(PREFERENCES)
+            original_decisions = list(DECISIONS)
             FILE_MOVES.clear()
             _MUTATION_ACTIVE = True
             try:
@@ -160,6 +200,7 @@ def mutation(function):
                     TASK_STATUSES.update(original_statuses)
                     PROJECT_ORDER[:] = original_order
                     PREFERENCES[:] = original_preferences
+                    DECISIONS[:] = original_decisions
                     RETRIEVER.assets = list(ASSETS)
                     # A failed mutation may have updated optional vectors. Use lexical
                     # retrieval until restart rebuilds them from the committed index.
@@ -311,6 +352,13 @@ def _load_library_index() -> None:
     prefs = raw.get("preferences", [])
     if isinstance(prefs, list):
         PREFERENCES.extend(str(pref) for pref in prefs)
+    decisions = raw.get("decisions", [])
+    if isinstance(decisions, list):
+        for item in decisions:
+            try:
+                DECISIONS.append(Decision.model_validate(item))
+            except ValidationError:
+                continue
     _reconcile_missing_files(ASSETS)
     summarize_projects(ASSETS, TASK_STATUSES)  # Migrate legacy task IDs before names change.
     RETRIEVER.add_assets(ASSETS)
@@ -322,8 +370,75 @@ def _save_library_index() -> None:
         "task_statuses": TASK_STATUSES,
         "project_order": PROJECT_ORDER,
         "preferences": PREFERENCES,
+        "decisions": [decision.model_dump() for decision in DECISIONS],
     }
     save_index(LIBRARY_INDEX_PATH, payload)
+
+
+def _load_query_log() -> None:
+    """Restore the answer log so feedback survives restarts."""
+    if not QUERY_LOG_PATH.exists():
+        return
+    try:
+        raw = json.loads(QUERY_LOG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Could not read query-log.json; starting a fresh log.")
+        return
+    if isinstance(raw, list):
+        QUERY_LOG.extend(entry for entry in raw if isinstance(entry, dict))
+
+
+def _save_query_log() -> None:
+    try:
+        atomic_write(
+            QUERY_LOG_PATH,
+            json.dumps(QUERY_LOG, default=str).encode("utf-8"),
+        )
+    except OSError:
+        logger.warning("Could not persist the query log.", exc_info=True)
+
+
+def _log_query(request: ChatRequest, answer, quality: dict, payload: dict) -> str:
+    """Record one answered question; returns the id used for feedback."""
+    entry = {
+        "id": uuid4().hex[:12],
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+        "question": request.question,
+        "project_name": request.project_name,
+        "standalone_question": payload.get("standalone_question"),
+        "rewrite_method": payload.get("rewrite_method"),
+        "engine": quality.get("engine"),
+        "mode": quality.get("mode"),
+        "model": quality.get("model"),
+        "prompt_version": quality.get("prompt_version"),
+        "confidence": quality.get("confidence"),
+        "grounded": quality.get("grounded"),
+        "sources_retrieved": quality.get("sources_retrieved"),
+        "files_cited": quality.get("files_cited"),
+        "tool_calls": quality.get("tool_calls"),
+        "processing_ms": quality.get("processing_ms"),
+        "retrieval_ms": quality.get("retrieval_ms"),
+        "feedback": None,
+    }
+    QUERY_LOG.append(entry)
+    del QUERY_LOG[:-QUERY_LOG_MAX]
+    _save_query_log()
+    return entry["id"]
+
+
+def _query_stats() -> dict:
+    unanswered = [
+        entry
+        for entry in QUERY_LOG
+        if not entry.get("sources_retrieved")
+        or (entry.get("confidence") == "low" and not entry.get("files_cited"))
+    ]
+    return {
+        "total": len(QUERY_LOG),
+        "unanswered": len(unanswered),
+        "feedback_up": sum(1 for entry in QUERY_LOG if entry.get("feedback") == "up"),
+        "feedback_down": sum(1 for entry in QUERY_LOG if entry.get("feedback") == "down"),
+    }
 
 
 def _storable_asset(asset: ProjectAsset) -> dict:
@@ -343,12 +458,34 @@ def _ordered_project_names() -> list[str]:
 
 
 _load_library_index()
+_load_query_log()
 _clean_stale_staging()
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
 
 
 class ChatRequest(BaseModel):
     question: str
     project_name: str | None = None
+    # Recent turns so follow-ups ("what about its key?") can be resolved.
+    history: list[ChatTurn] = Field(default_factory=list, max_length=40)
+
+
+MAX_CHAT_HISTORY = 12
+
+
+_TRANSCRIBABLE_SUFFIXES = frozenset(
+    {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".aiff", ".aif"}
+)
+
+
+class DecisionCreate(BaseModel):
+    text: str
+    project_name: str = "Unassigned"
+    source_asset_id: str | None = None
 
 
 class AssetUpdate(BaseModel):
@@ -394,14 +531,16 @@ def ai_status() -> dict:
     """Report which optional AI components are active, so the UI can tell the
     user what to install for smarter answers (models are never shipped)."""
     status = llm_status()
+    transcription = transcription_status()
     return {
         "answering": status,
         "vector_search": RETRIEVER.vector_enabled,
-        "hints": _ai_hints(status),
+        "transcription": transcription,
+        "hints": _ai_hints(status, transcription),
     }
 
 
-def _ai_hints(status: dict[str, str]) -> list[str]:
+def _ai_hints(status: dict[str, str], transcription: dict) -> list[str]:
     hints: list[str] = []
     if status["mode"] == "rules":
         hints.append(
@@ -415,6 +554,8 @@ def _ai_hints(status: dict[str, str]) -> list[str]:
             "Semantic search is off. Install the vector extra "
             '(pip install -e ".[vector]") to enable local ChromaDB embeddings.'
         )
+    if not transcription.get("available") and transcription.get("hint"):
+        hints.append(transcription["hint"])
     return hints
 
 
@@ -431,6 +572,109 @@ def update_memory(payload: MemoryUpdate) -> dict:
     cleaned = [pref.strip() for pref in payload.preferences if pref.strip()]
     PREFERENCES[:] = cleaned
     return producer_profile(ASSETS, PREFERENCES)
+
+
+@app.get("/api/decisions")
+@synchronized
+def list_decisions(project: str | None = None) -> dict:
+    """Recorded producer decisions, newest first, optionally scoped to a project."""
+    decisions = sorted(DECISIONS, key=lambda item: item.created_at, reverse=True)
+    if project and project != "All Projects":
+        prefix = project.rstrip("/") + "/"
+        decisions = [
+            item
+            for item in decisions
+            if item.project_name == project or item.project_name.startswith(prefix)
+        ]
+    return {"decisions": [decision.model_dump() for decision in decisions]}
+
+
+@app.post("/api/decisions")
+@mutation
+def add_decision(payload: DecisionCreate) -> dict:
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Decision text cannot be empty.")
+    if payload.source_asset_id:
+        _asset_by_id(payload.source_asset_id)  # Reject dangling anchors.
+    decision = Decision(
+        id=uuid4().hex,
+        text=text,
+        project_name=payload.project_name.strip() or "Unassigned",
+        source_asset_id=payload.source_asset_id,
+        created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+    )
+    DECISIONS.append(decision)
+    return {"decision": decision.model_dump(), "library": library()}
+
+
+@app.delete("/api/decisions/{decision_id}")
+@mutation
+def delete_decision(decision_id: str) -> dict:
+    decision = next((item for item in DECISIONS if item.id == decision_id), None)
+    if decision is None:
+        raise HTTPException(status_code=404, detail=f"Decision '{decision_id}' was not found.")
+    DECISIONS.remove(decision)
+    return {"deleted": decision_id, "library": library()}
+
+
+@app.get("/api/projects/report")
+@synchronized
+def project_report(project: str = "All Projects") -> Response:
+    """Markdown session report for one project (or the whole library)."""
+    scope = project.strip() or "All Projects"
+    markdown = build_session_report(
+        scope,
+        ASSETS,
+        summarize_projects(ASSETS, TASK_STATUSES),
+        DECISIONS,
+    )
+    filename = "sessioniq-library-report.md" if scope == "All Projects" else (
+        "sessioniq-report-" + re.sub(r"[^a-zA-Z0-9_-]+", "-", scope).strip("-") + ".md"
+    )
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/assets/{asset_id}/transcribe")
+async def transcribe_asset(asset_id: str) -> dict:
+    """Transcribe an audio voice memo into a note asset using local Whisper."""
+    with STATE_LOCK:
+        asset = _asset_by_id(asset_id)
+        if not asset.audio or not asset.stored_path or not Path(asset.stored_path).exists():
+            raise HTTPException(
+                status_code=400,
+                detail="Transcription needs an audio file that is present on disk.",
+            )
+        if Path(asset.file_name).suffix.lower() not in _TRANSCRIBABLE_SUFFIXES:
+            raise HTTPException(status_code=400, detail="This file type cannot be transcribed.")
+    status = transcription_status()
+    if not status.get("available"):
+        hint = status.get("hint", "Transcription is unavailable.")
+        raise HTTPException(status_code=409, detail=hint)
+    text = await run_in_threadpool(transcribe_audio, asset.stored_path)
+    if not text:
+        raise HTTPException(status_code=422, detail="No speech was detected in this file.")
+    return await run_in_threadpool(_commit_transcript, asset, text)
+
+
+@mutation
+def _commit_transcript(source_asset: ProjectAsset, text: str) -> dict:
+    stem = Path(source_asset.file_name).stem
+    target = safe_upload_path(source_asset.project_name, f"{stem}-transcript.txt")
+    target.write_text(text, encoding="utf-8")
+    note_asset = ingest_file(
+        target,
+        note=f"Voice memo transcript of {source_asset.file_name}",
+        project_name=source_asset.project_name,
+        stored_path=str(target),
+    )
+    ASSETS.append(note_asset)
+    RETRIEVER.add_assets([note_asset])
+    return {"asset": _asset_payload(note_asset), "library": library()}
 
 
 @app.get("/api/plugins")
@@ -731,34 +975,262 @@ def update_task(task_id: str, update: TaskUpdate) -> dict:
 
 @app.post("/api/chat")
 def chat(request: ChatRequest) -> dict:
-    global LAST_ANSWER, LAST_ANSWER_SOURCES
+    global LAST_ANSWER, LAST_ANSWER_SOURCES, LAST_ANSWER_DECISIONS
     started = time.perf_counter()
+    prepared = _prepare_chat(request)
+    answer = prepared["assistant"].answer(
+        request.question, prepared["sources"], history=prepared["history"]
+    )
+    payload = _finalize_chat(request, prepared, answer, started)
+    LAST_ANSWER = answer
+    LAST_ANSWER_SOURCES = payload["_all_sources"]
+    LAST_ANSWER_DECISIONS = prepared["decisions"]
+    return {key: value for key, value in payload.items() if not key.startswith("_")}
+
+
+def _prepare_chat(request: ChatRequest) -> dict:
+    """Shared chat prelude: history, follow-up rewriting, retrieval, toolbox.
+
+    LLM condensation runs before the state lock so a slow model never blocks
+    every other endpoint; snapshots and retrieval run inside it.
+    """
+    history = [turn.model_dump() for turn in request.history[-MAX_CHAT_HISTORY:]]
+    llm_on = bool(os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL"))
+    standalone, rewrite_method = request.question, None
+    if llm_on and looks_like_followup(request.question, bool(history)):
+        try:
+            standalone = condense_with_llm(
+                request.question,
+                history,
+                os.getenv("SESSIONIQ_MODEL", "gpt-4.1-mini"),
+            )
+            rewrite_method = "llm"
+        except Exception:
+            logger.warning("LLM condensation failed; trying the offline heuristic.", exc_info=True)
+
     with STATE_LOCK:
+        assets_snapshot = list(ASSETS)
+        if rewrite_method is None and looks_like_followup(request.question, bool(history)):
+            heuristic = deterministic_standalone(request.question, history, assets_snapshot)
+            if heuristic != request.question:
+                standalone, rewrite_method = heuristic, "heuristic"
         sources = copy.deepcopy(
-            RETRIEVER.search(request.question, project_name=request.project_name or None)
+            RETRIEVER.search(standalone, project_name=request.project_name or None)
         )
         preferences = list(PREFERENCES)
+        decisions = list(DECISIONS)
         tasks = [
             task for project in summarize_projects(ASSETS, TASK_STATUSES) for task in project.tasks
         ]
-    retrieved_ms = (time.perf_counter() - started) * 1000
 
-    assistant = GroundedAssistant(preferences=preferences, tasks=tasks)
-    answer = assistant.answer(request.question, sources)
-    elapsed_ms = (time.perf_counter() - started) * 1000
-
-    errors = validate_grounded_answer(answer, sources)
-    LAST_ANSWER = answer
-    LAST_ANSWER_SOURCES = sources
-    quality = _quality_report(
-        answer, sources, assistant.last_meta, errors, elapsed_ms, retrieved_ms
+    toolbox = LibraryToolbox(
+        assets_snapshot,
+        tasks=tasks,
+        search=RETRIEVER.search,
+        default_project=request.project_name or None,
+    )
+    assistant = GroundedAssistant(
+        preferences=preferences,
+        tasks=tasks,
+        toolbox=toolbox,
+        decisions=decisions,
     )
     return {
+        "history": history,
+        "standalone": standalone,
+        "rewrite_method": rewrite_method,
+        "sources": sources,
+        "decisions": decisions,
+        "toolbox": toolbox,
+        "assistant": assistant,
+        "retrieved_ms": time.perf_counter(),
+    }
+
+
+def _finalize_chat(request: ChatRequest, prepared: dict, answer, started: float) -> dict:
+    """Build the response payload shared by the plain and streaming endpoints."""
+    assistant = prepared["assistant"]
+    toolbox = prepared["toolbox"]
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    retrieved_ms = (prepared.pop("retrieved_ms", started) - started) * 1000
+
+    # Assets surfaced by tool calls count as sources: validation and the UI
+    # treat them exactly like retrieved ones.
+    retrieved_ids = {source.asset.id for source in prepared["sources"]}
+    tool_sources = [
+        RetrievedSource(asset=asset, score=0.0)
+        for asset in toolbox.touched.values()
+        if asset.id not in retrieved_ids
+    ]
+    all_sources = prepared["sources"] + tool_sources
+
+    errors = validate_grounded_answer(answer, all_sources, decisions=prepared["decisions"])
+    quality = _quality_report(
+        answer, all_sources, assistant.last_meta, errors, elapsed_ms, retrieved_ms
+    )
+    source_payloads = [
+        _asset_payload(source.asset) | {"score": round(source.score, 4), "via": "retrieval"}
+        for source in prepared["sources"]
+    ] + [
+        _asset_payload(source.asset) | {"score": 0.0, "via": "tool"} for source in tool_sources
+    ]
+    payload = {
         "answer": answer.model_dump(),
-        "sources": [_asset_payload(source.asset) | {"score": source.score} for source in sources],
+        "sources": source_payloads,
         "validation": errors,
         "quality": quality,
+        "standalone_question": (
+            prepared["standalone"] if prepared["standalone"] != request.question else None
+        ),
+        "rewrite_method": prepared["rewrite_method"],
+        "_all_sources": all_sources,
     }
+    payload["query_id"] = _log_query(request, answer, quality, payload)
+    return payload
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+@app.post("/api/chat/stream")
+def chat_stream(request: ChatRequest):
+    """Server-sent-events chat: interpretation, tool progress, and answer text
+    stream as they happen; the final event carries the same validated payload
+    as /api/chat (whose text supersedes anything streamed)."""
+    return StreamingResponse(
+        _chat_sse_events(request),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _chat_sse_events(request: ChatRequest):
+    started = time.perf_counter()
+    events: queue.Queue = queue.Queue()
+    done = object()
+
+    def run() -> None:
+        try:
+            prepared = _prepare_chat(request)
+            events.put(
+                (
+                    "meta",
+                    {
+                        "standalone_question": (
+                            prepared["standalone"]
+                            if prepared["standalone"] != request.question
+                            else None
+                        ),
+                        "rewrite_method": prepared["rewrite_method"],
+                    },
+                )
+            )
+            streamed_any = False
+
+            def on_event(kind: str, data: dict) -> None:
+                nonlocal streamed_any
+                if kind == "delta":
+                    streamed_any = True
+                events.put((kind, data))
+
+            answer = prepared["assistant"].answer(
+                request.question, prepared["sources"], history=prepared["history"],
+                on_event=on_event,
+            )
+            payload = _finalize_chat(request, prepared, answer, started)
+            global LAST_ANSWER, LAST_ANSWER_SOURCES, LAST_ANSWER_DECISIONS
+            LAST_ANSWER = answer
+            LAST_ANSWER_SOURCES = payload["_all_sources"]
+            LAST_ANSWER_DECISIONS = prepared["decisions"]
+            # Engines that do not stream (rules, single-shot fallback) still
+            # deliver the full text as one delta so the UI behaves uniformly.
+            if not streamed_any and answer.answer:
+                events.put(("delta", {"text": answer.answer}))
+            events.put(("done", {k: v for k, v in payload.items() if not k.startswith("_")}))
+        except Exception as exc:
+            logger.warning("Streaming chat failed.", exc_info=True)
+            events.put(("error", {"detail": str(exc) or "The answer stream failed."}))
+        finally:
+            events.put((done, None))
+
+    threading.Thread(target=run, daemon=True).start()
+    while True:
+        kind, data = events.get()
+        if kind is done:
+            break
+        yield _sse(kind, data)
+
+
+@app.get("/api/queries")
+@synchronized
+def list_queries(limit: int = 50, unanswered: bool = False) -> dict:
+    """Recent answered questions with their quality reports, plus totals.
+
+    ``unanswered`` filters to questions the library could not ground — the
+    backlog that shows what to upload, note down, or fix in retrieval.
+    """
+    entries = list(reversed(QUERY_LOG))
+    if unanswered:
+        entries = [
+            entry
+            for entry in entries
+            if not entry.get("sources_retrieved")
+            or (entry.get("confidence") == "low" and not entry.get("files_cited"))
+        ]
+    return {"entries": entries[: max(0, limit)], "stats": _query_stats()}
+
+
+class FeedbackUpdate(BaseModel):
+    feedback: Literal["up", "down"] | None = None
+
+
+@app.post("/api/queries/{query_id}/feedback")
+def update_query_feedback(query_id: str, update: FeedbackUpdate) -> dict:
+    entry = next((item for item in QUERY_LOG if item.get("id") == query_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Query '{query_id}' was not found.")
+    entry["feedback"] = update.feedback
+    _save_query_log()
+    return {"query_id": query_id, "feedback": update.feedback, "stats": _query_stats()}
+
+
+@app.post("/api/assets/{asset_id}/reanalyze")
+async def reanalyze_asset(asset_id: str) -> dict:
+    """Re-run analysis on the stored file, keeping id, status, tags, and notes.
+
+    Upgrades libraries analyzed before newer fields existed (key mode, richer
+    search text) one file at a time — a full-library batch belongs to the
+    future job queue.
+    """
+    with STATE_LOCK:
+        asset = _asset_by_id(asset_id)
+        if not asset.stored_path or not Path(asset.stored_path).exists():
+            raise HTTPException(400, "Re-analysis needs the stored file on disk.")
+        if Path(asset.file_name).suffix.lower() not in supported_extensions():
+            raise HTTPException(400, "This file type cannot be analyzed.")
+    fresh = await run_in_threadpool(
+        ingest_file,
+        asset.stored_path,
+        note=asset.note,
+        project_name=asset.project_name,
+        stored_path=asset.stored_path,
+    )
+    return await run_in_threadpool(_commit_reanalysis, asset_id, fresh)
+
+
+@mutation
+def _commit_reanalysis(asset_id: str, fresh: ProjectAsset) -> dict:
+    asset = _asset_by_id(asset_id)
+    # Analysis output is swapped in; user-curated fields (status, tags, note,
+    # dates, id) survive untouched so re-analyzing never reorganizes anything.
+    asset.audio = fresh.audio
+    asset.midi = fresh.midi
+    asset.text = fresh.text
+    asset.kind = fresh.kind
+    asset.last_analyzed = fresh.last_analyzed
+    RETRIEVER.refresh_asset(asset)
+    return {"asset": _asset_payload(asset), "library": library()}
 
 
 def _quality_report(
@@ -795,6 +1267,7 @@ def _quality_report(
         "temperature": meta.get("temperature"),
         "knowledge_source": meta.get("knowledge_source"),
         "token_usage": meta.get("token_usage"),
+        "tool_calls": meta.get("tool_calls") or None,
         "retrieval_ms": round(retrieved_ms, 1),
         "processing_ms": round(elapsed_ms, 1),
         "generated_at": datetime.now(UTC).isoformat(),
@@ -849,7 +1322,7 @@ def validation() -> dict:
                 }
             ]
         }
-    errors = validate_grounded_answer(LAST_ANSWER, LAST_ANSWER_SOURCES)
+    errors = validate_grounded_answer(LAST_ANSWER, LAST_ANSWER_SOURCES, LAST_ANSWER_DECISIONS)
     return {
         "checks": [
             {
@@ -907,6 +1380,7 @@ def _asset_payload(asset: ProjectAsset) -> dict:
     payload["file_missing"] = bool(asset.stored_path and not Path(asset.stored_path).exists())
     payload["bpm"] = _asset_bpm(asset)
     payload["key"] = _asset_key(asset)
+    payload["mode"] = asset.audio.mode_estimate if asset.audio else None
     payload["duration"] = (
         asset.audio.duration_seconds
         if asset.audio
@@ -914,7 +1388,26 @@ def _asset_payload(asset: ProjectAsset) -> dict:
         if asset.midi
         else None
     )
+    payload["energy_peak_seconds"] = _energy_peak_seconds(asset)
+    payload["first_beat_seconds"] = (
+        asset.audio.beat_positions[0] if asset.audio and asset.audio.beat_positions else None
+    )
     return payload
+
+
+def _energy_peak_seconds(asset: ProjectAsset) -> float | None:
+    """Time of the loudest moment, derived from the stored energy series.
+
+    The series is downsampled to ~96 points, so this is section-level ("the
+    drop around 1:32"), not sample-exact — good enough to jump the player to.
+    """
+    if not asset.audio or not asset.audio.energy_series or not asset.audio.duration_seconds:
+        return None
+    series = asset.audio.energy_series
+    if len(series) < 2:
+        return None
+    peak_index = max(range(len(series)), key=lambda index: series[index])
+    return round(peak_index / (len(series) - 1) * asset.audio.duration_seconds, 1)
 
 
 def _asset_bpm(asset: ProjectAsset) -> float | None:

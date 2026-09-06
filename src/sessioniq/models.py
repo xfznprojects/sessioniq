@@ -54,6 +54,9 @@ class AudioMetadata(BaseModel):
     codec: str | None = None
     bitrate: int | None = Field(default=None, ge=0)
     key_estimate: str | None = None
+    # "major"/"minor" from chroma profiles; None when the old analyzer ran
+    # (older assets gain it on re-analysis, similarity falls back without it).
+    mode_estimate: str | None = None
 
 
 class MidiNote(BaseModel):
@@ -168,6 +171,7 @@ class ProjectAsset(BaseModel):
         if self.note:
             sections.append(f"user note: {self.note}")
         if self.audio:
+            mode_text = f" mode={self.audio.mode_estimate}" if self.audio.mode_estimate else ""
             sections.append(
                 "audio metadata: "
                 f"duration={self.audio.duration_seconds:.2f}s "
@@ -178,6 +182,7 @@ class ProjectAsset(BaseModel):
                 f"rms={self.audio.rms_amplitude} "
                 f"rms_db={self.audio.rms_db} "
                 f"brightness={self.audio.spectral_centroid_mean}"
+                f"{mode_text}"
             )
         if self.midi:
             note_names = ", ".join(note.note_name for note in self.midi.notes[:32])
@@ -231,6 +236,21 @@ class ProjectAsset(BaseModel):
 class RetrievedSource(BaseModel):
     asset: ProjectAsset
     score: float
+
+
+class Decision(BaseModel):
+    """A producer decision worth remembering across sessions.
+
+    Part of episodic memory: unlike preferences (taste) or the library
+    fingerprint (derived stats), decisions capture what was chosen and when,
+    optionally anchored to the file the decision was made about.
+    """
+
+    id: str
+    text: str
+    project_name: str = "Unassigned"
+    source_asset_id: str | None = None
+    created_at: str
 
 
 class AssistantAnswer(BaseModel):
