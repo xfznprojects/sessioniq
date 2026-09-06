@@ -97,12 +97,14 @@ class GroundedAssistant:
         tasks: list[ProjectTask] | None = None,
         toolbox: LibraryToolbox | None = None,
         decisions: list[Decision] | None = None,
+        summaries: list | None = None,
     ) -> None:
         self.model = model or os.getenv("SESSIONIQ_MODEL", "gpt-4.1-mini")
         self.preferences = preferences or []
         self.tasks = tasks
         self.toolbox = toolbox
         self.decisions = decisions or []
+        self.summaries = summaries or []
         # Populated on every answer() call so callers (the API) can build an
         # LLMOps-style quality report: which engine, prompt, and tokens ran.
         self.last_meta: dict[str, object] = self._base_meta("rules")
@@ -416,6 +418,7 @@ class GroundedAssistant:
             self._superlative_answer,
             self._task_answer,
             self._decision_answer,
+            self._next_up_answer,
             self._status_answer,
             self._count_answer,
             self._key_answer,
@@ -563,6 +566,50 @@ class GroundedAssistant:
         ]
         return AssistantAnswer(
             answer="\n".join(["Recorded decisions:", *lines]),
+            citations=citations,
+            confidence="medium",
+        )
+
+    def _next_up_answer(
+        self, lowered: str, assets: list[ProjectAsset]
+    ) -> AssistantAnswer | None:
+        if not any(
+            phrase in lowered
+            for phrase in (
+                "finish next",
+                "work on next",
+                "next to finish",
+                "should i finish",
+                "should i work on",
+                "prioriti",
+            )
+        ):
+            return None
+        from sessioniq.advisor import rank_next
+
+        ranking_assets = self.toolbox.assets if self.toolbox is not None else assets
+        ranking = rank_next(ranking_assets, self.summaries)
+        if not ranking:
+            return None
+        lines = [
+            f"{index}. {item['project_name']} — {'; '.join(item['reasons']) or 'keep going'}"
+            for index, item in enumerate(ranking[:3], start=1)
+        ]
+        top_project = ranking[0]["project_name"]
+        citations = [
+            Citation(
+                asset_id=asset.id,
+                file_name=asset.file_name,
+                evidence=f"status={asset.status.value}, project={asset.project_name}",
+            )
+            for asset in ranking_assets
+            if asset.project_name == top_project
+        ][:4] or [
+            Citation(asset_id=asset.id, file_name=asset.file_name, evidence=_asset_brief(asset))
+            for asset in assets[:2]
+        ]
+        return AssistantAnswer(
+            answer="\n".join(["Finish these next:", *lines]),
             citations=citations,
             confidence="medium",
         )

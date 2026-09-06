@@ -38,7 +38,9 @@ def _midi_to_freq(note: int) -> float:
     return 440.0 * 2 ** ((note - 69) / 12)
 
 
-def synth_wav(path: Path, *, seconds: float, bpm: float, root: int, brightness: float) -> None:
+def synth_wav(
+    path: Path, *, seconds: float, bpm: float, root: int, brightness: float, amp: float = 0.85
+) -> None:
     """A short musical loop: a triad drone + a beat pulse, so librosa has real
     tonal and rhythmic content to analyze (varied BPM / key / brightness)."""
     rng = np.random.default_rng(root * 1000 + int(bpm))
@@ -66,7 +68,7 @@ def synth_wav(path: Path, *, seconds: float, bpm: float, root: int, brightness: 
     mix[:fade] *= np.linspace(0, 1, fade)
     mix[-fade:] *= np.linspace(1, 0, fade)
     mix /= np.max(np.abs(mix)) + 1e-9
-    mix *= 0.85
+    mix *= amp
     sf.write(path, mix.astype(np.float32), SR)
 
 
@@ -196,6 +198,12 @@ def build() -> None:
         "afterglow_master.wav",
         lambda p: synth_wav(p, seconds=8, bpm=120, root=69, brightness=0.45),
     )
+    # A quieter reference bounce so Mix vs reference shows real deltas.
+    add(
+        "Neon Horizon/Afterglow",
+        "afterglow_reference.wav",
+        lambda p: synth_wav(p, seconds=8, bpm=120, root=69, brightness=0.30, amp=0.4),
+    )
     add("Neon Horizon/Afterglow", "notes.txt", lambda p: p.write_text(AFTERGLOW_NOTES))
     add("Neon Horizon/Afterglow", "cover.png", lambda p: write_png_gradient(p, *COVERS["amber"]))
 
@@ -250,6 +258,22 @@ def build() -> None:
             "Client Cue 03",
         ],
         "preferences": ["darker kicks", "Ableton", "warm pads", "lo-fi textures", "LUFS -8"],
+        "decisions": [
+            {
+                "id": "seed-decision-1",
+                "text": "Locked Midnight Drive at 120 BPM; single release, bridge cut.",
+                "project_name": "Neon Horizon/Midnight Drive",
+                "source_asset_id": None,
+                "created_at": now,
+            },
+            {
+                "id": "seed-decision-2",
+                "text": "Client Cue 03: deliver the 30s bed before the master.",
+                "project_name": "Client Cue 03",
+                "source_asset_id": None,
+                "created_at": now,
+            },
+        ],
     }
     index_path = UPLOAD_ROOT.parent / "library-index.json"
     index_path.write_text(json.dumps(index), encoding="utf-8")

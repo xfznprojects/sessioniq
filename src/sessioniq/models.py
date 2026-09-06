@@ -4,7 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 
 class AssetKind(StrEnum):
@@ -47,6 +47,8 @@ class AudioMetadata(BaseModel):
     peak_db: float | None = None
     rms_amplitude: float | None = Field(default=None, ge=0)
     rms_db: float | None = None
+    # Integrated loudness (ITU-R BS.1770-4) in LUFS; None when unmeasured.
+    integrated_lufs: float | None = None
     spectral_centroid_mean: float | None = Field(default=None, ge=0)
     energy_series: list[float] = Field(default_factory=list)
     spectral_centroid_series: list[float] = Field(default_factory=list)
@@ -143,6 +145,15 @@ class ProjectAsset(BaseModel):
     midi: MidiMetadata | None = None
     text: NoteMetadata | None = None
 
+    # Memoized search text: retrieval rebuilds it per asset per query, which
+    # dominates chat latency on large libraries. Invalidate via
+    # invalidate_search_cache() whenever a searchable field changes — all API
+    # mutation paths already call Retriever.refresh_asset, which does.
+    _search_text_cache: str | None = PrivateAttr(default=None)
+
+    def invalidate_search_cache(self) -> None:
+        self._search_text_cache = None
+
     @field_validator("file_name")
     @classmethod
     def file_name_only(cls, value: str) -> str:
@@ -181,6 +192,7 @@ class ProjectAsset(BaseModel):
                 f"peak_db={self.audio.peak_db} "
                 f"rms={self.audio.rms_amplitude} "
                 f"rms_db={self.audio.rms_db} "
+                f"lufs={self.audio.integrated_lufs} "
                 f"brightness={self.audio.spectral_centroid_mean}"
                 f"{mode_text}"
             )
@@ -204,6 +216,12 @@ class ProjectAsset(BaseModel):
             if self.text.action_items:
                 sections.append(f"action items: {'; '.join(self.text.action_items)}")
         return "\n".join(sections)
+
+    def cached_search_text(self) -> str:
+        """search_text() memoized until invalidate_search_cache() is called."""
+        if self._search_text_cache is None:
+            self._search_text_cache = self.search_text()
+        return self._search_text_cache
 
     def compact_metadata(self, include_series: bool = True) -> dict[str, Any]:
         data: dict[str, Any] = {

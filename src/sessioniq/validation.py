@@ -51,7 +51,7 @@ def _numeric_errors(
                 value = getattr(metadata, key, None)
                 if value is not None:
                     allowed.setdefault(field, []).append(value)
-        for field, harvested in _harvest_claim_values(source.asset.search_text()).items():
+        for field, harvested in _harvest_claim_values(source.asset.cached_search_text()).items():
             allowed.setdefault(field, []).extend(harvested)
     for decision in decisions or []:
         for field, harvested in _harvest_claim_values(decision.text).items():

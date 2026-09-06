@@ -184,6 +184,17 @@ TOOL_SCHEMAS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "next_up",
+            "description": (
+                "Rank projects by what is closest to finishable right now "
+                "(readiness, task progress, freshness). Use for 'what should I finish next?'."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -210,14 +221,21 @@ class LibraryToolbox:
         tasks: list[ProjectTask] | None = None,
         search: _SearchLike | None = None,
         default_project: str | None = None,
+        summaries: list | None = None,
     ) -> None:
         self._assets = assets
         self._tasks = tasks or []
         self._search = search
         self._default_project = default_project
+        self._summaries = summaries or []
         # asset_id -> asset for everything a tool returned, so the API can
         # validate citations against tool-found sources too.
         self.touched: dict[str, ProjectAsset] = {}
+
+    @property
+    def assets(self) -> list[ProjectAsset]:
+        """The library snapshot this toolbox answers from."""
+        return self._assets
 
     def execute(self, name: str, arguments: dict) -> str:
         handlers = {
@@ -227,6 +245,7 @@ class LibraryToolbox:
             "asset_details": self._tool_details,
             "similar_tracks": self._tool_similar,
             "list_projects": self._tool_projects,
+            "next_up": self._tool_next_up,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -374,6 +393,19 @@ class LibraryToolbox:
                 for match in matches
             ],
         }
+
+    def _tool_next_up(self, args: dict) -> dict:
+        del args
+        from sessioniq.advisor import rank_next
+
+        if not self._summaries:
+            return {"error": "Project summaries are not available."}
+        ranking = rank_next(self._assets, self._summaries)
+        for item in ranking[:3]:
+            for asset in self._assets:
+                if asset.project_name == item["project_name"]:
+                    self.touched[asset.id] = asset
+        return {"ranking": ranking[:5]}
 
     def _tool_projects(self, args: dict) -> dict:
         del args

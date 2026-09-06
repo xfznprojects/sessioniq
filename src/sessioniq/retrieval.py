@@ -110,6 +110,11 @@ def is_aggregate_query(query: str) -> bool:
     return bool(set(tokenize(query)) & AGGREGATE_HINTS)
 
 
+# The metadata boost can stack several signals (BPM hit, name hit, key…);
+# this is roughly its practical maximum, used to normalize it into [0, 1].
+METADATA_NORM = 2.5
+
+
 class InMemoryRetriever:
     """Lexical retrieval over extracted metadata: synonym expansion plus IDF cosine."""
 
@@ -144,16 +149,22 @@ class InMemoryRetriever:
 
         query_counts = expand_query_tokens(content_tokens(query))
         doc_counts = {
-            asset.id: Counter(content_tokens(asset.search_text())) for asset in candidates
+            asset.id: Counter(content_tokens(asset.cached_search_text())) for asset in candidates
         }
         idf = _inverse_document_frequency(doc_counts.values())
         semantic = self._semantic_scores(query, candidates)
 
+        # Components are normalized to [0, 1] before weighting so their
+        # relative influence is stable regardless of vector availability.
         scored: list[RetrievedSource] = []
         for asset in candidates:
-            lexical_score = _weighted_cosine(query_counts, doc_counts[asset.id], idf)
-            metadata_score = _metadata_score(query, asset)
-            score = lexical_score + metadata_score + semantic.get(asset.id, 0.0)
+            lexical = _weighted_cosine(query_counts, doc_counts[asset.id], idf)
+            metadata = min(_metadata_score(query, asset) / METADATA_NORM, 1.0)
+            vector = semantic.get(asset.id, 0.0)
+            if semantic:
+                score = 0.55 * lexical + 0.25 * metadata + 0.20 * vector
+            else:
+                score = 0.70 * lexical + 0.30 * metadata
             if score > 0:
                 scored.append(RetrievedSource(asset=asset, score=score))
 
@@ -214,6 +225,8 @@ class HybridRetriever(InMemoryRetriever):
     def add_assets(self, assets: list[ProjectAsset]) -> None:
         known_ids = {asset.id for asset in self.assets}
         fresh = [asset for asset in assets if asset.id not in known_ids]
+        for asset in assets:
+            asset.invalidate_search_cache()
         super().add_assets(assets)
         if not fresh or self._collection is None:
             return
@@ -245,6 +258,7 @@ class HybridRetriever(InMemoryRetriever):
 
     def refresh_asset(self, asset: ProjectAsset) -> None:
         """Re-embed one asset after its metadata (status, tags) changed."""
+        asset.invalidate_search_cache()
         if self._collection is None:
             return
         try:

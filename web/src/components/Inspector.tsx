@@ -130,6 +130,7 @@ export function Inspector({
           <Stat label="Codec" value={asset.audio.codec} />
           <Stat label="Peak dB" value={asset.audio.peak_db?.toFixed(1) ?? "—"} />
           <Stat label="RMS dB" value={asset.audio.rms_db?.toFixed(1) ?? "—"} />
+          <Stat label="LUFS" value={asset.audio.integrated_lufs?.toFixed(1) ?? "—"} hint="Integrated loudness (ITU-R BS.1770-4)" />
           <Stat label="Brightness" value={asset.audio.spectral_centroid_mean?.toFixed(0) ?? "—"} />
         </div>
       )}
