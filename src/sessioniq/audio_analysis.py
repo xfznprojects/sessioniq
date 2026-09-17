@@ -304,8 +304,9 @@ def integrated_lufs(samples: np.ndarray, sample_rate: int) -> float | None:
         return None
 
     try:
-        # scipy ships with librosa; lfilter is vectorized C, essential here —
-        # a per-sample Python loop would cost seconds per track.
+        # Imported locally so a missing scipy costs LUFS on this file rather than
+        # the whole analysis. lfilter is vectorized C — a per-sample Python loop
+        # would cost seconds per track.
         from scipy.signal import lfilter
 
         shelf_b, shelf_a = _high_shelf_coeffs(sample_rate)
