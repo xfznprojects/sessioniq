@@ -108,9 +108,11 @@ code it describes and the evaluation exits non-zero.
   ChromaDB's default local model; repeated runs on one machine varied between roughly 320 ms and
   851 ms p95 depending on load. Read it as "hundreds of milliseconds", not as a precise figure.
 - **The vector configuration is not perfectly repeatable.** Across runs its MRR moved between 0.821
-  and 0.822 and its recall@5 between 0.879 and 0.887, while hit@1, hit@3 and hit@5 held steady. The
-  offline configuration reproduced identically every time. Differences that small are within noise
-  at 30 questions — treat the vector rows as approximate.
+  and 0.822 and its recall@5 between 0.879 and 0.887, while hit@1, hit@3 and hit@5 held steady.
+  Differences that small are within noise at 30 questions — treat the vector rows as approximate.
+- **The offline configuration is stable but not bit-identical across platforms.** Hit rates
+  reproduced exactly on every run and on both Windows and the Linux CI runner; MRR came out 0.806
+  on Windows against 0.805 on Linux, which is tie ordering rather than a behavioural difference.
 - **Labels are hand-written.** They were read off a real ingestion run, and
   `tests/test_evals.py` checks that every label still names a file the corpus creates, but a
   mistaken label would quietly depress the score rather than announce itself.
