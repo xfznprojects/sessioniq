@@ -1,0 +1,25 @@
+services:
+  api:
+    build: .
+    environment:
+      SESSIONIQ_HOST: 0.0.0.0
+      SESSIONIQ_PORT: "8000"
+    volumes:
+      - sessioniq-data:/app/.sessioniq-data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    # Uncomment to pass model credentials through from a local .env file.
+    # env_file: .env
+
+  web:
+    build: ./web
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  sessioniq-data:
