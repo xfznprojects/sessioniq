@@ -7,12 +7,12 @@
 Upload audio, MIDI, and notes — SessionIQ analyzes them, organizes them into albums and songs,
 and answers questions about your work **with citations to the exact files it used.**
 
+[![CI](https://github.com/xfznprojects/sessioniq/actions/workflows/ci.yml/badge.svg)](https://github.com/xfznprojects/sessioniq/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-38BDF8?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
-[![Tests](https://img.shields.io/badge/tests-143_passing-2ea44f)](#-testing)
 [![Ruff](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)](https://docs.astral.sh/ruff/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -244,9 +244,30 @@ flowchart LR
 **Backend** — Python 3.11+, FastAPI, Uvicorn, Pydantic, librosa, numpy, soundfile, pretty_midi/mido,
 scipy (K-weighted loudness), ChromaDB (optional), faster-whisper (optional), OpenAI SDK (OpenAI **or** Ollama).
 **Frontend** — React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Table, Recharts, HTML audio, Framer Motion, Lucide, music-metadata.
-**Quality** — Pytest, Ruff, `tsc` + Vite build.
+**Quality** — Pytest, Ruff, `tsc` + Vite build, GitHub Actions, Docker Compose.
 
 ## 🚀 Quick start
+
+### Docker
+
+```bash
+docker compose up --build
+```
+
+Then open **http://localhost:8080**. nginx serves the dashboard and proxies `/api` and `/uploads`
+to the API container, so the browser sees a single origin. Runtime data lives in the
+`sessioniq-data` volume and survives restarts.
+
+To load the generated demo content:
+
+```bash
+docker compose exec api python scripts/seed_demo.py
+docker compose restart api
+```
+
+To enable a model, uncomment `env_file: .env` in `docker-compose.yml` and put your keys in `.env`.
+
+### Local toolchain
 
 **Prerequisites:** Python 3.11+ and Node 22.18+ (Node 24 recommended).
 
@@ -264,8 +285,9 @@ python -m venv .venv
 
 ```powershell
 cd web
-npm install          # or: pnpm install
-npm run dev          # → http://127.0.0.1:5173
+corepack enable      # provides the pnpm version pinned in package.json
+pnpm install
+pnpm dev             # → http://127.0.0.1:5173
 ```
 
 **3. Load demo content** (optional, recommended)
@@ -330,9 +352,12 @@ sessioniq/
 ```powershell
 .\.venv\Scripts\python.exe -m pytest        # 143 passing
 .\.venv\Scripts\python.exe -m ruff check .
-cd web; npm test                            # frontend scope regressions
-npm run build                               # tsc + vite build
+cd web; pnpm test                           # frontend scope regressions
+pnpm build                                  # tsc + vite build
 ```
+
+CI runs the backend suite on Python 3.11 and 3.12, the frontend tests and build, and both
+container images on every push and pull request.
 
 ## 🗄️ Library persistence and recovery
 
