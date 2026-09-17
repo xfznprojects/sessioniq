@@ -1,0 +1,15 @@
+# Render blueprint. The image ships a generated demo library, so the service
+# starts in seconds and needs no disk. See DEPLOY.md before using this.
+services:
+  - type: web
+    name: sessioniq
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: SESSIONIQ_HOST
+        value: 0.0.0.0
+      # Lexical retrieval only: no embedding model to download at boot.
+      - key: SESSIONIQ_DISABLE_VECTOR
+        value: "1"

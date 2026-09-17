@@ -254,18 +254,23 @@ scipy (K-weighted loudness), ChromaDB (optional), faster-whisper (optional), Ope
 docker compose up --build
 ```
 
-Then open **http://localhost:8080**. nginx serves the dashboard and proxies `/api` and `/uploads`
-to the API container, so the browser sees a single origin. Runtime data lives in the
-`sessioniq-data` volume and survives restarts.
+Then open **http://localhost:8080**. One container serves the dashboard, the API and uploaded
+files from a single origin, and it ships a pre-generated demo library — the audio analysis happens
+at build time, so the app is populated the moment it starts rather than on first request.
 
-To load the generated demo content:
+To run it without Compose:
 
 ```bash
-docker compose exec api python scripts/seed_demo.py
-docker compose restart api
+docker build -t sessioniq .
+docker run --rm -p 8080:8000 sessioniq
 ```
 
-To enable a model, uncomment `env_file: .env` in `docker-compose.yml` and put your keys in `.env`.
+### Deploying
+
+The same image runs on any container host, and `render.yaml` is a blueprint for a one-click deploy
+on Render. [DEPLOY.md](DEPLOY.md) covers the steps, what a free instance can and cannot do, and the
+fact that a hosted instance has **no authentication** — SessionIQ is a single-user app, so do not
+host a private library on it.
 
 ### Local toolchain
 
@@ -343,7 +348,7 @@ sessioniq/
 ├── web/src/                # React + TypeScript dashboard
 │   ├── App.tsx
 │   └── components/         # Sidebar, Chat, Inspector, Insights, Studio, Pipeline, Player…
-├── scripts/                # run_api, seed_demo, check_local_ai
+├── scripts/                # run_api, seed_demo, check_local_ai, docker_entrypoint
 └── tests/                  # pytest suite
 ```
 
