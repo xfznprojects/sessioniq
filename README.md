@@ -277,18 +277,35 @@ scipy (K-weighted loudness), ChromaDB (optional), faster-whisper (optional), Ope
 docker compose up --build
 ```
 
-Then open **http://localhost:8080**. nginx serves the dashboard and proxies `/api` and `/uploads`
-to the API container, so the browser sees a single origin. Runtime data lives in the
-`sessioniq-data` volume and survives restarts.
+Then open **http://localhost:8080**. One container serves the dashboard, the API and uploaded
+files from a single origin, and it ships a pre-generated demo library — the audio analysis happens
+at build time, so the app is populated the moment it starts rather than on first request.
 
-To load the generated demo content:
+To run it without Compose:
 
 ```bash
-docker compose exec api python scripts/seed_demo.py
-docker compose restart api
+docker build -t sessioniq .
+docker run --rm -p 8080:8000 sessioniq
 ```
 
-To enable a model, uncomment `env_file: .env` in `docker-compose.yml` and put your keys in `.env`.
+The container is self-contained: no Python, no Node, and no API key or model required. It is the
+quickest way to see SessionIQ running without setting up a toolchain.
+
+Uploads live inside the container and go away with it. Attach a volume to keep them:
+
+```bash
+docker run --rm -p 8080:8000 -v sessioniq-data:/app/.sessioniq-data sessioniq
+```
+
+The first boot on an empty volume regenerates the demo content, which takes about a minute because
+it runs the analyzers for real; set `SESSIONIQ_SEED_DEMO=1` to make that automatic.
+
+**Container settings** — `SESSIONIQ_HOST` (the image sets `0.0.0.0`), `SESSIONIQ_PORT` and `PORT`,
+`SESSIONIQ_UPLOAD_ROOT`, `SESSIONIQ_STATIC_DIR`, `SESSIONIQ_CORS_ORIGINS`,
+`SESSIONIQ_DISABLE_VECTOR`, `SESSIONIQ_LUFS_TARGET`. `.env.example` covers the model settings.
+
+SessionIQ is a single-user local app: it has no authentication and expects one library per process,
+so it is not meant to be exposed publicly.
 
 ### Local toolchain
 
@@ -366,7 +383,7 @@ sessioniq/
 ├── web/src/                # React + TypeScript dashboard
 │   ├── App.tsx
 │   └── components/         # Sidebar, Chat, Inspector, Insights, Studio, Pipeline, Player…
-├── scripts/                # run_api, seed_demo, check_local_ai
+├── scripts/                # run_api, seed_demo, check_local_ai, docker_entrypoint
 └── tests/                  # pytest suite
 ```
 

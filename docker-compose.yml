@@ -1,25 +1,17 @@
 services:
-  api:
+  sessioniq:
     build: .
-    environment:
-      SESSIONIQ_HOST: 0.0.0.0
-      SESSIONIQ_PORT: "8000"
-    volumes:
-      - sessioniq-data:/app/.sessioniq-data
     ports:
-      - "8000:8000"
+      - "8080:8000"
     restart: unless-stopped
-    # Uncomment to pass model credentials through from a local .env file.
-    # env_file: .env
+    # The image ships a generated demo library, so the container serves a
+    # populated dashboard in seconds. Uncomment the volume for uploads that
+    # survive a restart — the first boot on an empty volume regenerates the
+    # demo content and takes about a minute.
+    # volumes:
+    #   - sessioniq-data:/app/.sessioniq-data
+    # environment:
+    #   SESSIONIQ_SEED_DEMO: "1"
 
-  web:
-    build: ./web
-    depends_on:
-      api:
-        condition: service_healthy
-    ports:
-      - "8080:80"
-    restart: unless-stopped
-
-volumes:
-  sessioniq-data:
+# volumes:
+#   sessioniq-data:

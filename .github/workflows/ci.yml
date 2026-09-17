@@ -68,5 +68,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: docker build -t sessioniq-api .
-      - run: docker build -t sessioniq-dashboard ./web
+      - run: docker build -t sessioniq .
+      - name: Start the container
+        run: docker run -d --name sessioniq -p 8080:8000 sessioniq
+      - name: Wait for the API to answer
+        run: |
+          for _ in $(seq 1 45); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/api/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the API never became healthy"
+          exit 1
+      - name: The image must serve the dashboard
+        run: curl -fsS http://127.0.0.1:8080/ | grep -qi "SessionIQ"
+      - name: The baked demo library must be loaded
+        run: |
+          assets=$(curl -fsS http://127.0.0.1:8080/api/library \
+            | python3 -c "import json,sys; print(len(json.load(sys.stdin)['assets']))")
+          echo "assets: $assets"
+          test "$assets" -gt 0
+      - name: Container logs
+        if: always()
+        run: docker logs sessioniq
