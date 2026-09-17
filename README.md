@@ -321,7 +321,7 @@ sessioniq/
 ├── web/src/                # React + TypeScript dashboard
 │   ├── App.tsx
 │   └── components/         # Sidebar, Chat, Inspector, Insights, Studio, Pipeline, Player…
-├── scripts/                # run_api, run_streamlit, seed_demo, check_local_ai
+├── scripts/                # run_api, seed_demo, check_local_ai
 └── tests/                  # pytest suite
 ```
 

@@ -15,8 +15,8 @@ dependencies = [
     "pydantic>=2.7.0",
     "python-dotenv>=1.0.1",
     "python-multipart>=0.0.9",
+    "scipy>=1.11.0",
     "soundfile>=0.12.1",
-    "streamlit>=1.36.0",
     "uvicorn>=0.30.0",
 ]
 
