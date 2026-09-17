@@ -63,9 +63,20 @@ from sessioniq.validation import validate_grounded_answer
 load_dotenv()
 
 app = FastAPI(title="SessionIQ API")
+
+# The Vite dev server is a separate origin and must be allowed explicitly. A
+# deployed build is served by this app, so it is same-origin and needs no entry
+# here.
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "SESSIONIQ_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1686,3 +1697,25 @@ def _display_type(asset: ProjectAsset) -> str:
     if asset.kind == AssetKind.IMAGE:
         return "Image"
     return asset.kind.value.title()
+
+
+def _dashboard_directory() -> Path | None:
+    """The built dashboard, when one is present.
+
+    Local development uses the Vite dev server on its own port, so finding
+    nothing here is the normal case outside a container.
+    """
+    configured = os.getenv("SESSIONIQ_STATIC_DIR")
+    candidates = [Path(configured)] if configured else []
+    candidates.append(Path(__file__).resolve().parents[2] / "web" / "dist")
+    for directory in candidates:
+        if (directory / "index.html").is_file():
+            return directory
+    return None
+
+
+# Mounted last on purpose: API routes and /uploads are registered above, and
+# Starlette matches in registration order, so this catch-all cannot shadow them.
+_DASHBOARD_DIR = _dashboard_directory()
+if _DASHBOARD_DIR is not None:
+    app.mount("/", StaticFiles(directory=str(_DASHBOARD_DIR), html=True), name="dashboard")

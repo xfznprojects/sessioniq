@@ -12,5 +12,6 @@ sys.path.insert(0, str(ROOT / "src"))
 uvicorn.run(
     "sessioniq.api:app",
     host=os.environ.get("SESSIONIQ_HOST", "127.0.0.1"),
-    port=int(os.environ.get("SESSIONIQ_PORT", "8000")),
+    # Most hosts inject PORT; the container sets SESSIONIQ_PORT explicitly.
+    port=int(os.environ.get("SESSIONIQ_PORT") or os.environ.get("PORT") or "8000"),
 )
