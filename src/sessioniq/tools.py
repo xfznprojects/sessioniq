@@ -212,6 +212,39 @@ def _brief(asset: ProjectAsset) -> dict:
     }
 
 
+# Payload keys holding lists of results, in the order worth trimming.
+_TRUNCIBLE_KEYS = ("assets", "matches", "ranking", "projects")
+
+
+def _shrink_payload(result: object, limit: int) -> object:
+    """Trim a tool payload until it serialises under ``limit``.
+
+    Chopping the serialised string produced invalid JSON, which the model had
+    to cope with and an MCP client would simply fail to parse. Dropping whole
+    list items keeps the payload valid and still bounds its size.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    candidate = result
+    while len(json.dumps(candidate, default=str)) > limit:
+        for key in _TRUNCIBLE_KEYS:
+            items = candidate.get(key)
+            if isinstance(items, list) and len(items) > 1:
+                candidate = {**candidate, key: items[: len(items) // 2], "truncated": True}
+                break
+        else:
+            shortened = {
+                key: (value[:400] if isinstance(value, str) and len(value) > 400 else value)
+                for key, value in candidate.items()
+            }
+            if shortened != candidate:
+                candidate = {**shortened, "truncated": True}
+                continue
+            return {"truncated": True, "error": "Result too large to return in full."}
+    return candidate
+
+
 class LibraryToolbox:
     """Executes tool calls against a snapshot of the library."""
 
@@ -254,10 +287,7 @@ class LibraryToolbox:
             result = handler(arguments)
         except Exception as exc:  # One bad argument must not kill the answer.
             result = {"error": f"{type(exc).__name__}: {exc}"}
-        text = json.dumps(result, default=str)
-        if len(text) > MAX_TOOL_RESULT_CHARS:
-            text = text[:MAX_TOOL_RESULT_CHARS] + '…"}'
-        return text
+        return json.dumps(_shrink_payload(result, MAX_TOOL_RESULT_CHARS), default=str)
 
     # --- Filter shared by filter_assets and compute_stat -----------------
 

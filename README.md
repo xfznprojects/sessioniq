@@ -360,6 +360,39 @@ SessionIQ works offline with a deterministic answer engine. To upgrade:
 Run `.\.venv\Scripts\python.exe scripts\check_local_ai.py` to see what's active and get setup hints.
 Models and vector indexes download to your machine's cache — they are **never committed**.
 
+### Optional: query your library from your own agent (MCP)
+
+SessionIQ speaks the [Model Context Protocol](https://modelcontextprotocol.io), so an MCP client —
+Claude Desktop, Cursor, or an agent of your own — can query your library directly.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[mcp]"
+```
+
+Point the client at the server. For a client that takes a JSON config:
+
+```json
+{
+  "mcpServers": {
+    "sessioniq": {
+      "command": "/path/to/sessioniq/.venv/bin/python",
+      "args": ["/path/to/sessioniq/scripts/run_mcp.py"]
+    }
+  }
+}
+```
+
+On Windows the interpreter is `.venv\Scripts\python.exe`.
+
+It exposes the same seven tools the in-app assistant calls — `list_projects`, `search_library`,
+`filter_assets`, `compute_stat`, `asset_details`, `similar_tracks` and `next_up` — and delegates to
+the same code, so a question answered here and the same question asked in the app are computed
+identically. That logic is what `evals/` measures.
+
+Two things worth knowing. The server is **read-only**: it answers questions and changes nothing.
+And it reads the library at startup, so it sees the library as of when the client launched it —
+restart the client to pick up files added since.
+
 ## 📁 Project structure
 
 ```
@@ -378,6 +411,7 @@ sessioniq/
 │   ├── advisor.py          # reference A/B, finish-next ranking, weekly digest
 │   ├── transcription.py    # optional local Whisper voice-memo transcription
 │   ├── jobs.py             # in-process background jobs (progress, cancel)
+│   ├── mcp_server.py       # the tool layer exposed over MCP (optional extra)
 │   ├── plugins.py          # analyzer registry
 │   └── project_workspace.py# projects, smart collections, health, reports, file ops
 ├── web/src/                # React + TypeScript dashboard

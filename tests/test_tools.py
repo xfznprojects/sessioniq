@@ -11,7 +11,7 @@ from sessioniq.models import (
     ProjectTask,
     TaskStatus,
 )
-from sessioniq.tools import LibraryToolbox
+from sessioniq.tools import MAX_TOOL_RESULT_CHARS, LibraryToolbox, _shrink_payload
 
 
 def _audio(
@@ -173,3 +173,40 @@ def test_unknown_tool_and_bad_arguments_return_errors():
     assert "error" in _run(toolbox, "does_not_exist", {})
     # Non-serializable filter values must not raise out of execute().
     assert "error" in _run(toolbox, "compute_stat", {"field": "bpm", "op": "explode"})
+
+
+class TestPayloadShrinking:
+    """Over-long results must stay parseable.
+
+    The previous implementation chopped the serialised string and appended a
+    marker, which produced invalid JSON. The model coped with it; an MCP client
+    cannot, so the payload is now trimmed structurally instead.
+    """
+
+    def test_small_payloads_pass_through_untouched(self):
+        payload = {"assets": [{"file_name": "a.wav"}]}
+        assert _shrink_payload(payload, MAX_TOOL_RESULT_CHARS) == payload
+
+    def test_a_long_list_is_halved_and_still_parses(self):
+        payload = {"assets": [{"file_name": f"{i}.wav", "note": "x" * 80} for i in range(60)]}
+        shrunk = _shrink_payload(payload, MAX_TOOL_RESULT_CHARS)
+        assert shrunk["truncated"] is True
+        assert 0 < len(shrunk["assets"]) < 60
+        assert len(json.dumps(shrunk)) <= MAX_TOOL_RESULT_CHARS
+
+    def test_oversized_strings_shrink_when_no_list_can(self):
+        shrunk = _shrink_payload({"metadata": "y" * 9000}, MAX_TOOL_RESULT_CHARS)
+        assert shrunk["truncated"] is True
+        assert len(json.dumps(shrunk)) <= MAX_TOOL_RESULT_CHARS
+
+    def test_an_impossible_payload_reports_instead_of_emitting_broken_json(self):
+        shrunk = _shrink_payload({"assets": [{"k": "z" * 9000}]}, 200)
+        assert shrunk["truncated"] is True
+        json.loads(json.dumps(shrunk))
+
+    def test_execute_stays_parseable_over_a_large_library(self):
+        # filter_assets caps its own list, so a large result is exactly where
+        # the old string-chopping corruption used to surface.
+        toolbox = _toolbox([_audio(f"a{i}", 100.0 + i) for i in range(60)])
+        result = _run(toolbox, "filter_assets", {})
+        assert result["total_matches"] == 60
