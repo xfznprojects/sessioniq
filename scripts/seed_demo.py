@@ -291,6 +291,11 @@ def purge() -> None:
 
 
 if __name__ == "__main__":
+    if "--if-empty" in sys.argv:
+        existing = UPLOAD_ROOT.parent / "library-index.json"
+        if existing.exists():
+            print(f"Library already present at {existing}; seeding skipped.")
+            raise SystemExit(0)
     print(f"Purging {UPLOAD_ROOT.parent} ...")
     purge()
     print("Generating synthetic demo content ...")
