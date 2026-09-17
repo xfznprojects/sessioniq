@@ -265,12 +265,24 @@ docker build -t sessioniq .
 docker run --rm -p 8080:8000 sessioniq
 ```
 
-### Deploying
+The container is self-contained: no Python, no Node, and no API key or model required. It is the
+quickest way to see SessionIQ running without setting up a toolchain.
 
-The same image runs on any container host, and `render.yaml` is a blueprint for a one-click deploy
-on Render. [DEPLOY.md](DEPLOY.md) covers the steps, what a free instance can and cannot do, and the
-fact that a hosted instance has **no authentication** — SessionIQ is a single-user app, so do not
-host a private library on it.
+Uploads live inside the container and go away with it. Attach a volume to keep them:
+
+```bash
+docker run --rm -p 8080:8000 -v sessioniq-data:/app/.sessioniq-data sessioniq
+```
+
+The first boot on an empty volume regenerates the demo content, which takes about a minute because
+it runs the analyzers for real; set `SESSIONIQ_SEED_DEMO=1` to make that automatic.
+
+**Container settings** — `SESSIONIQ_HOST` (the image sets `0.0.0.0`), `SESSIONIQ_PORT` and `PORT`,
+`SESSIONIQ_UPLOAD_ROOT`, `SESSIONIQ_STATIC_DIR`, `SESSIONIQ_CORS_ORIGINS`,
+`SESSIONIQ_DISABLE_VECTOR`, `SESSIONIQ_LUFS_TARGET`. `.env.example` covers the model settings.
+
+SessionIQ is a single-user local app: it has no authentication and expects one library per process,
+so it is not meant to be exposed publicly.
 
 ### Local toolchain
 
