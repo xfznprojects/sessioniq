@@ -214,6 +214,29 @@ A persistent bottom player continues across views and remembers the last track a
 </tr>
 </table>
 
+## 📊 Measured results
+
+`evals/` holds a labeled evaluation: 30 questions over a generated 17-file corpus, each with the
+files that should answer it, plus 7 computable questions checked against the tool layer.
+
+| configuration | hit@1 | hit@3 | hit@5 | recall@5 | MRR | p95 latency |
+| --- | --- | --- | --- | --- | --- | --- |
+| lexical + metadata (offline default) | 0.733 | 0.867 | 0.900 | 0.871 | 0.806 | 1.9 ms |
+| + vector search (ChromaDB) | 0.767 | 0.867 | 0.900 | 0.879 | 0.822 | 851 ms |
+
+Every expected file was retrieved for all 30 questions. Topical questions — key, status, tags,
+project scope, note content — put the right file first essentially every time.
+
+Superlative questions do not, and are not meant to. *"Which track is the loudest"* asks for a
+comparison, not a similar file: every audio file matches the words about equally well, so ranking
+cannot pick a winner. Those go through the tool layer instead, which answered **7 of 7** correctly
+by comparing real numbers.
+
+The trade-off is the honest one: vector search buys 3 points of hit@1 and costs roughly two orders
+of magnitude in latency. That is why it is optional.
+
+Methodology, metric definitions and known limits: [`evals/README.md`](evals/README.md).
+
 ## 🏗️ Architecture
 
 ```mermaid

@@ -1,0 +1,591 @@
+{
+  "generated": "2026-09-17",
+  "corpus_size": 17,
+  "projects": 5,
+  "vector_enabled": true,
+  "questions": 30,
+  "baseline": {
+    "cases": 30,
+    "hit_at_k": {
+      "1": 0.7667,
+      "3": 0.8667,
+      "5": 0.9
+    },
+    "recall_at_k": {
+      "1": 0.5736,
+      "3": 0.7847,
+      "5": 0.8792
+    },
+    "precision_at_k": {
+      "1": 0.7667,
+      "3": 0.4333,
+      "5": 0.32
+    },
+    "mrr": 0.8224
+  },
+  "by_category": {
+    "aggregate": {
+      "cases": 1,
+      "hit_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      },
+      "recall_at_k": {
+        "1": 0.125,
+        "3": 0.375,
+        "5": 0.625
+      },
+      "precision_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      },
+      "mrr": 1.0
+    },
+    "content": {
+      "cases": 6,
+      "hit_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      },
+      "recall_at_k": {
+        "1": 0.8889,
+        "3": 0.9444,
+        "5": 1.0
+      },
+      "precision_at_k": {
+        "1": 1.0,
+        "3": 0.3889,
+        "5": 0.2667
+      },
+      "mrr": 1.0
+    },
+    "format": {
+      "cases": 2,
+      "hit_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      },
+      "recall_at_k": {
+        "1": 0.625,
+        "3": 0.875,
+        "5": 1.0
+      },
+      "precision_at_k": {
+        "1": 1.0,
+        "3": 0.6667,
+        "5": 0.5
+      },
+      "mrr": 1.0
+    },
+    "key": {
+      "cases": 3,
+      "hit_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      },
+      "recall_at_k": {
+        "1": 0.5833,
+        "3": 0.9167,
+        "5": 1.0
+      },
+      "precision_at_k": {
+        "1": 1.0,
+        "3": 0.6667,
+        "5": 0.4667
+      },
+      "mrr": 1.0
+    },
+    "project": {
+      "cases": 2,
+      "hit_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      },
+      "recall_at_k": {
+        "1": 0.625,
+        "3": 0.875,
+        "5": 1.0
+      },
+      "precision_at_k": {
+        "1": 1.0,
+        "3": 0.6667,
+        "5": 0.5
+      },
+      "mrr": 1.0
+    },
+    "status": {
+      "cases": 3,
+      "hit_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      },
+      "recall_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      },
+      "precision_at_k": {
+        "1": 1.0,
+        "3": 0.3333,
+        "5": 0.2
+      },
+      "mrr": 1.0
+    },
+    "superlative": {
+      "cases": 6,
+      "hit_at_k": {
+        "1": 0.1667,
+        "3": 0.3333,
+        "5": 0.5
+      },
+      "recall_at_k": {
+        "1": 0.0417,
+        "3": 0.2917,
+        "5": 0.5
+      },
+      "precision_at_k": {
+        "1": 0.1667,
+        "3": 0.2222,
+        "5": 0.2
+      },
+      "mrr": 0.334
+    },
+    "synonym": {
+      "cases": 3,
+      "hit_at_k": {
+        "1": 0.3333,
+        "3": 1.0,
+        "5": 1.0
+      },
+      "recall_at_k": {
+        "1": 0.0833,
+        "3": 0.8333,
+        "5": 0.9167
+      },
+      "precision_at_k": {
+        "1": 0.3333,
+        "3": 0.4444,
+        "5": 0.3333
+      },
+      "mrr": 0.5556
+    },
+    "tag": {
+      "cases": 4,
+      "hit_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      },
+      "recall_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      },
+      "precision_at_k": {
+        "1": 1.0,
+        "3": 0.3333,
+        "5": 0.2
+      },
+      "mrr": 1.0
+    }
+  },
+  "ablation": [
+    {
+      "name": "production (with vector)",
+      "cases": 30,
+      "hit_at_k": {
+        "1": 0.7667,
+        "3": 0.8667,
+        "5": 0.9
+      },
+      "recall_at_k": {
+        "1": 0.5736,
+        "3": 0.7847,
+        "5": 0.8792
+      },
+      "precision_at_k": {
+        "1": 0.7667,
+        "3": 0.4333,
+        "5": 0.32
+      },
+      "mrr": 0.8224
+    },
+    {
+      "name": "lexical only",
+      "cases": 30,
+      "hit_at_k": {
+        "1": 0.7,
+        "3": 0.8667,
+        "5": 0.9
+      },
+      "recall_at_k": {
+        "1": 0.5069,
+        "3": 0.7708,
+        "5": 0.8542
+      },
+      "precision_at_k": {
+        "1": 0.7,
+        "3": 0.4222,
+        "5": 0.3067
+      },
+      "mrr": 0.7784
+    },
+    {
+      "name": "metadata only",
+      "cases": 30,
+      "hit_at_k": {
+        "1": 0.3667,
+        "3": 0.6,
+        "5": 0.7
+      },
+      "recall_at_k": {
+        "1": 0.2736,
+        "3": 0.5319,
+        "5": 0.6875
+      },
+      "precision_at_k": {
+        "1": 0.3667,
+        "3": 0.2667,
+        "5": 0.2267
+      },
+      "mrr": 0.5247
+    },
+    {
+      "name": "lexical heavy",
+      "cases": 30,
+      "hit_at_k": {
+        "1": 0.7333,
+        "3": 0.8667,
+        "5": 0.9
+      },
+      "recall_at_k": {
+        "1": 0.5403,
+        "3": 0.7597,
+        "5": 0.8542
+      },
+      "precision_at_k": {
+        "1": 0.7333,
+        "3": 0.4111,
+        "5": 0.3067
+      },
+      "mrr": 0.8062
+    },
+    {
+      "name": "production (lexical+metadata)",
+      "cases": 30,
+      "hit_at_k": {
+        "1": 0.7333,
+        "3": 0.8667,
+        "5": 0.9
+      },
+      "recall_at_k": {
+        "1": 0.5403,
+        "3": 0.7597,
+        "5": 0.8708
+      },
+      "precision_at_k": {
+        "1": 0.7333,
+        "3": 0.4111,
+        "5": 0.3133
+      },
+      "mrr": 0.8062
+    },
+    {
+      "name": "balanced",
+      "cases": 30,
+      "hit_at_k": {
+        "1": 0.7,
+        "3": 0.8667,
+        "5": 0.9
+      },
+      "recall_at_k": {
+        "1": 0.5069,
+        "3": 0.7764,
+        "5": 0.8708
+      },
+      "precision_at_k": {
+        "1": 0.7,
+        "3": 0.4222,
+        "5": 0.3133
+      },
+      "mrr": 0.7847
+    },
+    {
+      "name": "metadata heavy",
+      "cases": 30,
+      "hit_at_k": {
+        "1": 0.6667,
+        "3": 0.8667,
+        "5": 0.9
+      },
+      "recall_at_k": {
+        "1": 0.4736,
+        "3": 0.7764,
+        "5": 0.8708
+      },
+      "precision_at_k": {
+        "1": 0.6667,
+        "3": 0.4222,
+        "5": 0.3133
+      },
+      "mrr": 0.7631
+    }
+  ],
+  "latency_ms": {
+    "calls": 150,
+    "mean": 407.779,
+    "p50": 321.887,
+    "p95": 850.876,
+    "max": 1256.44
+  },
+  "tool_accuracy": {
+    "passed": 7,
+    "total": 7,
+    "cases": [
+      {
+        "question": "which track is the loudest?",
+        "field": "rms_db",
+        "op": "max",
+        "expected": [
+          "Client Cue 03/reference.wav"
+        ],
+        "actual": "Client Cue 03/reference.wav",
+        "passed": true
+      },
+      {
+        "question": "which track is the quietest?",
+        "field": "rms_db",
+        "op": "min",
+        "expected": [
+          "Neon Horizon/Afterglow/afterglow_reference.wav"
+        ],
+        "actual": "Neon Horizon/Afterglow/afterglow_reference.wav",
+        "passed": true
+      },
+      {
+        "question": "which track is the slowest?",
+        "field": "bpm",
+        "op": "min",
+        "expected": [
+          "Lo-Fi Study/lofi_sketch.wav"
+        ],
+        "actual": "Lo-Fi Study/lofi_sketch.wav",
+        "passed": true
+      },
+      {
+        "question": "which tracks are the fastest?",
+        "field": "bpm",
+        "op": "max",
+        "expected": [
+          "Neon Horizon/Midnight Drive/midnight_drive.wav",
+          "Neon Horizon/Afterglow/afterglow.wav",
+          "Neon Horizon/Afterglow/afterglow_master.wav",
+          "Neon Horizon/Afterglow/afterglow_reference.wav"
+        ],
+        "actual": "Neon Horizon/Midnight Drive/midnight_drive.wav",
+        "passed": true
+      },
+      {
+        "question": "which track is the brightest?",
+        "field": "brightness",
+        "op": "max",
+        "expected": [
+          "Neon Horizon/Midnight Drive/midnight_drive.wav"
+        ],
+        "actual": "Neon Horizon/Midnight Drive/midnight_drive.wav",
+        "passed": true
+      },
+      {
+        "question": "which track is the darkest?",
+        "field": "brightness",
+        "op": "min",
+        "expected": [
+          "Lo-Fi Study/lofi_sketch.wav"
+        ],
+        "actual": "Lo-Fi Study/lofi_sketch.wav",
+        "passed": true
+      },
+      {
+        "question": "which track is the longest?",
+        "field": "duration",
+        "op": "max",
+        "expected": [
+          "Neon Horizon/Midnight Drive/midnight_drive.wav",
+          "Neon Horizon/Afterglow/afterglow.wav",
+          "Neon Horizon/Afterglow/afterglow_master.wav",
+          "Neon Horizon/Afterglow/afterglow_reference.wav"
+        ],
+        "actual": "Neon Horizon/Midnight Drive/midnight_drive.wav",
+        "passed": true
+      }
+    ]
+  },
+  "weak_cases": [
+    {
+      "question": "which track is the loudest?",
+      "category": "superlative",
+      "expected": [
+        "Client Cue 03/reference.wav"
+      ],
+      "retrieved": [
+        "Neon Horizon/Afterglow/afterglow.wav",
+        "Neon Horizon/Afterglow/afterglow_master.wav",
+        "Client Cue 03/reference.wav",
+        "Neon Horizon/Afterglow/afterglow_reference.wav",
+        "Neon Horizon/Midnight Drive/midnight_drive.wav"
+      ],
+      "first_relevant_rank": 3,
+      "scores": [
+        0.1895,
+        0.1892,
+        0.1891,
+        0.1879,
+        0.1862
+      ]
+    },
+    {
+      "question": "which track is the quietest?",
+      "category": "superlative",
+      "expected": [
+        "Neon Horizon/Afterglow/afterglow_reference.wav"
+      ],
+      "retrieved": [
+        "Neon Horizon/Afterglow/afterglow.wav",
+        "Neon Horizon/Afterglow/afterglow_master.wav",
+        "Client Cue 03/reference.wav",
+        "Neon Horizon/Afterglow/afterglow_reference.wav",
+        "Neon Horizon/Midnight Drive/midnight_drive.wav"
+      ],
+      "first_relevant_rank": 4,
+      "scores": [
+        0.1878,
+        0.1876,
+        0.1876,
+        0.1861,
+        0.1861
+      ]
+    },
+    {
+      "question": "which track is the slowest?",
+      "category": "superlative",
+      "expected": [
+        "Lo-Fi Study/lofi_sketch.wav"
+      ],
+      "retrieved": [
+        "Neon Horizon/Afterglow/afterglow_master.wav",
+        "Client Cue 03/reference.wav",
+        "Neon Horizon/Afterglow/afterglow.wav",
+        "Neon Horizon/Afterglow/afterglow_reference.wav",
+        "Neon Horizon/Midnight Drive/midnight_drive.wav"
+      ],
+      "first_relevant_rank": 7,
+      "scores": [
+        0.1902,
+        0.1894,
+        0.1893,
+        0.1884,
+        0.1871
+      ]
+    },
+    {
+      "question": "which track is the brightest?",
+      "category": "superlative",
+      "expected": [
+        "Neon Horizon/Midnight Drive/midnight_drive.wav"
+      ],
+      "retrieved": [
+        "Neon Horizon/Afterglow/afterglow_master.wav",
+        "Neon Horizon/Afterglow/afterglow.wav",
+        "Neon Horizon/Afterglow/notes.txt",
+        "Neon Horizon/Afterglow/afterglow_reference.wav",
+        "Client Cue 03/reference.wav"
+      ],
+      "first_relevant_rank": 6,
+      "scores": [
+        0.1673,
+        0.167,
+        0.1668,
+        0.1664,
+        0.1648
+      ]
+    },
+    {
+      "question": "which track is the darkest?",
+      "category": "superlative",
+      "expected": [
+        "Lo-Fi Study/lofi_sketch.wav"
+      ],
+      "retrieved": [
+        "Neon Horizon/Afterglow/afterglow_master.wav",
+        "Neon Horizon/Afterglow/afterglow.wav",
+        "Neon Horizon/Afterglow/notes.txt",
+        "Neon Horizon/Afterglow/afterglow_reference.wav",
+        "Neon Horizon/Midnight Drive/midnight_drive.wav"
+      ],
+      "first_relevant_rank": 9,
+      "scores": [
+        0.1701,
+        0.1698,
+        0.1691,
+        0.1687,
+        0.1667
+      ]
+    },
+    {
+      "question": "which song is the loudest?",
+      "category": "synonym",
+      "expected": [
+        "Client Cue 03/reference.wav"
+      ],
+      "retrieved": [
+        "Neon Horizon/Afterglow/afterglow.wav",
+        "Neon Horizon/Afterglow/afterglow_master.wav",
+        "Client Cue 03/reference.wav",
+        "Neon Horizon/Afterglow/afterglow_reference.wav",
+        "Client Cue 03/cue_draft.wav"
+      ],
+      "first_relevant_rank": 3,
+      "scores": [
+        0.1841,
+        0.1833,
+        0.1826,
+        0.181,
+        0.1802
+      ]
+    },
+    {
+      "question": "which track has the highest volume?",
+      "category": "synonym",
+      "expected": [
+        "Client Cue 03/reference.wav"
+      ],
+      "retrieved": [
+        "Neon Horizon/Afterglow/afterglow_master.wav",
+        "Neon Horizon/Afterglow/afterglow.wav",
+        "Client Cue 03/reference.wav",
+        "Neon Horizon/Midnight Drive/midnight_drive.wav",
+        "Neon Horizon/Afterglow/afterglow_reference.wav"
+      ],
+      "first_relevant_rank": 3,
+      "scores": [
+        0.1843,
+        0.184,
+        0.1829,
+        0.1827,
+        0.1826
+      ]
+    }
+  ],
+  "unretrieved": 0,
+  "ranking_fidelity": {
+    "checked": 30,
+    "mismatches": []
+  }
+}
