@@ -98,7 +98,7 @@ def write_png_gradient(path: Path, top: tuple[int, int, int], bottom: tuple[int,
     bottom_arr = np.array(bottom, dtype=np.float64)
     column = top_arr * (1 - ramp) + bottom_arr * ramp  # height x 3
     # subtle diagonal sheen
-    sheen = (np.linspace(0, 1, width)[None, :] * 18).astype(np.float64)
+    sheen = (np.linspace(0, 1, width)[None, :] * 3).astype(np.float64)
     image = np.repeat(column[:, None, :], width, axis=1)
     image += sheen[:, :, None]
     image = np.clip(image, 0, 255).astype(np.uint8)
@@ -121,10 +121,10 @@ def write_png_gradient(path: Path, top: tuple[int, int, int], bottom: tuple[int,
 # --- demo library definition ------------------------------------------------
 
 COVERS = {
-    "aurora": ((37, 61, 140), (14, 20, 38)),
-    "amber": ((150, 92, 34), (26, 18, 12)),
-    "mint": ((28, 110, 96), (10, 24, 22)),
-    "violet": ((78, 44, 130), (18, 12, 30)),
+    "aurora": ((30, 37, 48), (17, 20, 26)),
+    "amber": ((39, 36, 33), (21, 20, 19)),
+    "mint": ((29, 39, 37), (17, 23, 22)),
+    "violet": ((36, 33, 43), (21, 19, 25)),
 }
 
 MIX_NOTES = """Midnight Drive - mix notes

@@ -847,13 +847,18 @@ function Header({
 }
 
 function ProjectOverview({ library, onSelect }: { library: LibraryResponse; onSelect: (name: string) => void }) {
-  return <div className="mt-3 grid gap-2 sm:grid-cols-2 2xl:grid-cols-3">
+  return <div className="mt-3 grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
     {library.projects.map(project => {
       const done = project.tasks.filter(t => t.status === "Done").length;
       const next = project.tasks.find(t => t.status !== "Done");
+      const tone = Array.from(project.project_name).reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) >>> 0, 0) % 6;
       return <button key={project.project_name} onClick={() => onSelect(project.project_name)}
-        className="flex min-w-0 items-center gap-3 rounded-md border border-border bg-background/40 p-3 text-left transition-colors hover:border-accent/40 focus-visible:outline-2 focus-visible:outline-accent">
-        {project.artwork ? <img src={project.artwork} alt="" className="size-12 shrink-0 rounded-md object-cover" loading="lazy" /> : <Disc3 className="size-8 shrink-0 text-accent/50" />}
+        className={cn("project-preview flex min-w-0 items-center gap-3 rounded-lg border p-3 text-left focus-visible:outline-2 focus-visible:outline-offset-2",
+          `project-tone-${tone}`)}>
+        <span className="project-cover grid size-12 shrink-0 place-items-center rounded-lg" aria-hidden="true">
+          {project.artwork && <img src={project.artwork} alt="" className="project-cover-artwork" loading="lazy" />}
+          <Disc3 className="project-cover-icon size-6" strokeWidth={1.5} />
+        </span>
         <div className="min-w-0"><p className="truncate text-sm font-semibold">{project.project_name}</p>
           <p className="mt-1 text-xs text-muted-foreground">{project.asset_count} files · {project.tasks.length ? `${done} of ${project.tasks.length} tasks done` : "No tasks yet"}</p>
           {next && <p className="mt-1 truncate text-xs text-foreground-secondary">Next: {next.description}</p>}
