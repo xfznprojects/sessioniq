@@ -16,7 +16,7 @@ and answers questions about your work **with citations to the exact files it use
 [![Ruff](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)](https://docs.astral.sh/ruff/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-![SessionIQ dashboard](docs/sessioniq-dashboard.png)
+![SessionIQ workspace — project tiles with subtle color accents, shown in perspective](docs/sessioniq-dashboard.png)
 
 </div>
 
@@ -190,6 +190,8 @@ and vector scores with fixed normalized weights, so asking questions stays quick
 grows past a thousand files.
 
 ## 🖼️ A tour
+
+![SessionIQ Insights — creative prompts and next-up ranking, shown in perspective](docs/insights-showcase.png)
 
 <table>
 <tr>
